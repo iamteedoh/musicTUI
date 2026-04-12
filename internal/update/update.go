@@ -27,8 +27,10 @@ const (
 )
 
 type Release struct {
-	TagName string  `json:"tag_name"`
-	Assets  []Asset `json:"assets"`
+	TagName    string  `json:"tag_name"`
+	Assets     []Asset `json:"assets"`
+	Draft      bool    `json:"draft"`
+	Prerelease bool    `json:"prerelease"`
 }
 
 type Asset struct {
@@ -38,8 +40,14 @@ type Asset struct {
 }
 
 // LatestRelease fetches the most recent published release from GitHub.
+//
+// We intentionally use the /releases list endpoint rather than
+// /releases/latest. The "latest" endpoint can return 404 for brand-new
+// releases when called unauthenticated (GitHub's caching/eligibility
+// logic is opaque), while the list endpoint reliably returns all
+// published releases in newest-first order.
 func LatestRelease(ctx context.Context) (*Release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=10", owner, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -57,11 +65,16 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("github: status %d", resp.StatusCode)
 	}
 
-	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	var releases []Release
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return nil, err
 	}
-	return &rel, nil
+	for i := range releases {
+		if !releases[i].Draft && !releases[i].Prerelease {
+			return &releases[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no published releases found")
 }
 
 // IsNewer returns true when remote is a higher semver-ish tag than current.
