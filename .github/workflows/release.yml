@@ -64,6 +64,7 @@ jobs:
         run: cargo build --bin player-bridge --release
 
       - name: Build musictui (Go)
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
