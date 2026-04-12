@@ -25,7 +25,7 @@ jobs:
             artifact: musictui-darwin-arm64
             bridge_bin: player-bridge
             audio_deps: ""
-          - os: macos-13
+          - os: macos-latest
             goos: darwin
             goarch: amd64
             artifact: musictui-darwin-amd64
