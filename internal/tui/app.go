@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -164,15 +165,25 @@ func (a App) startInteractiveAuthCmd() tea.Cmd {
 		sp.ClearToken()
 
 		url := a.auth.AuthURL()
-
-		// Try to open browser
-		if err := exec.Command("xdg-open", url).Start(); err != nil {
-			// Fallback: user will see URL in status
-			_ = err
-		}
+		openBrowser(url)
 
 		return AuthURLMsg{URL: url}
 	}
+}
+
+// openBrowser attempts to open the given URL in the user's default browser.
+// Failures are silent — the URL is also surfaced in the UI as a fallback.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
 }
 
 func (a App) waitForAuthCallbackCmd() tea.Cmd {
@@ -602,7 +613,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "ctrl+l":
 		if a.auth == nil {
-			a.status = "No Spotify client_id configured"
+			a.modal.ShowInput(
+				"Connect to Spotify",
+				"Paste your Spotify Client ID (from developer.spotify.com/dashboard)",
+				"", "", "",
+				components.ActionConfigureSpotify, "")
 			return a, nil
 		}
 		a.status = "Opening browser for Spotify login..."
@@ -782,6 +797,21 @@ func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch s {
 		case "enter":
 			name := strings.TrimSpace(a.modal.Input1)
+			if a.modal.Action == components.ActionConfigureSpotify {
+				if name == "" {
+					return a, nil
+				}
+				a.config.Spotify.ClientID = name
+				if err := config.Save(a.config); err != nil {
+					a.status = "Failed to save config: " + err.Error()
+					a.modal.Close()
+					return a, nil
+				}
+				a.auth = sp.NewAuth(name)
+				a.modal.Close()
+				a.status = "Opening browser for Spotify login..."
+				return a, a.startInteractiveAuthCmd()
+			}
 			if name != "" && a.client != nil {
 				desc := a.modal.Input2
 				action := a.modal.Action
@@ -1349,6 +1379,7 @@ func (a App) View() string {
 	var viewContent string
 	switch a.view {
 	case model.ViewHome:
+		a.home.NeedsConfig = a.auth == nil
 		viewContent = a.home.View(th, centerInnerW, viewH)
 	case model.ViewLibrary:
 		viewContent = a.library.View(th, centerInnerW, viewH)

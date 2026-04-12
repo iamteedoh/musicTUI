@@ -8,8 +8,9 @@ import (
 )
 
 type Home struct {
-	Username string
-	AuthURL  string // shown when waiting for browser auth
+	Username    string
+	AuthURL     string // shown when waiting for browser auth
+	NeedsConfig bool   // true when no Spotify client_id is configured
 }
 
 func NewHome() Home {
@@ -39,10 +40,21 @@ func (h Home) View(th theme.Theme, width, height int) string {
 			dim.Render(h.AuthURL),
 		)
 	} else {
+		prompt := "○ Not connected — press Ctrl+L to log in"
+		if h.NeedsConfig {
+			prompt = "○ Not set up — press Ctrl+L to enter your Spotify Client ID"
+		}
 		lines = append(lines,
 			accent.Bold(true).Render("musicTUI"),
-			lipgloss.NewStyle().Foreground(th.Warning).Render("○ Not connected — press Ctrl+L"),
+			lipgloss.NewStyle().Foreground(th.Warning).Render(prompt),
 		)
+		if h.NeedsConfig {
+			lines = append(lines,
+				"",
+				muted.Render("Get a free Client ID at:"),
+				dim.Render("https://developer.spotify.com/dashboard"),
+			)
+		}
 	}
 
 	lines = append(lines, "")

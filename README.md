@@ -131,51 +131,35 @@ While your app is in "Development mode" (the default), you must add your Spotify
 
 > Without this step, the app can connect but some features (like viewing playlist tracks) may not work.
 
-### Step 3: Configure musicTUI
+### Step 3: Launch musicTUI and paste your Client ID
 
-Create a configuration file that tells musicTUI your Client ID.
+musicTUI has a built-in setup wizard — no config files to edit by hand.
 
 1. Open a terminal.
-
-2. Create the config folder and file:
-
-   **Linux / Mac**:
+2. Start the app:
    ```
-   mkdir -p ~/.config/musicTUI
-   nano ~/.config/musicTUI/config.toml
+   musicTUI
    ```
+3. You will see the Home screen: **"Not set up — press Ctrl+L to enter your Spotify Client ID"**.
+4. Press **Ctrl+L**. A popup appears.
+5. Paste the Client ID you copied in Step 1, then press **Enter**.
+6. Your web browser opens to a Spotify login page. Log in and click **"Agree"** to grant access.
+7. After logging in, you will see a page that says **"Login Successful!"** — close that browser tab.
+8. Back in the terminal, your playlists appear in the sidebar. You're connected.
 
-   **Windows** (PowerShell):
-   ```
-   mkdir "$env:APPDATA\musicTUI"
-   notepad "$env:APPDATA\musicTUI\config.toml"
-   ```
+> Your Client ID and login are saved, so you only do this once. If your session expires later, press Ctrl+L to re-authenticate.
 
-3. Paste this into the file, replacing `YOUR_CLIENT_ID` with the Client ID you copied from Step 1:
-
-   ```toml
-   [spotify]
-   client_id = "YOUR_CLIENT_ID"
-   ```
-
-4. Save and close the file.
+> Prefer to edit the config file yourself? Create `~/.config/musicTUI/config.toml` (Linux/Mac) or `%APPDATA%\musicTUI\config.toml` (Windows) with:
+> ```toml
+> [spotify]
+> client_id = "YOUR_CLIENT_ID"
+> ```
 
 ---
 
 ## First Launch
 
-1. Open a terminal.
-2. Navigate to where you placed the app files, or if they are in your PATH, just type:
-   ```
-   musictui
-   ```
-3. You will see the Home screen with a message: **"Not connected — press Ctrl+L"**.
-4. Press **Ctrl+L** on your keyboard.
-5. Your web browser will open to a Spotify login page. Log in and click **"Agree"** to grant access.
-6. After logging in, you will see a page that says **"Login Successful!"** — you can close that browser tab.
-7. Switch back to your terminal. musicTUI is now connected and your playlists will appear in the sidebar.
-
-> Your login is saved so you won't need to do this every time. If your session expires, press Ctrl+L again.
+Follow the steps in Step 3 above. Subsequent launches skip the setup — just run `musicTUI` and you're connected.
 
 ---
 
@@ -512,8 +496,20 @@ check_duplicates = true
 
 ## Troubleshooting
 
-### "Not connected — press Ctrl+L"
+### macOS: "Apple could not verify musicTUI is free of malware"
+The downloaded binary is not signed by an Apple Developer account, so macOS Gatekeeper blocks it by default. Two ways to bypass:
+
+- **Terminal** — remove the quarantine attribute:
+  ```
+  xattr -d com.apple.quarantine /path/to/musicTUI
+  ```
+- **Finder** — right-click the `musicTUI` binary → **Open** → **Open** again in the confirmation dialog. macOS remembers this decision.
+
+### "Not connected — press Ctrl+L to log in"
 You need to log in. Press **Ctrl+L** and complete the Spotify login in your browser.
+
+### "Not set up — press Ctrl+L to enter your Spotify Client ID"
+You haven't configured a Client ID yet. Press **Ctrl+L**, paste your Client ID into the popup, and press **Enter**. See [Setting Up Spotify](#setting-up-spotify) if you don't have one yet.
 
 ### "Session expired — press Ctrl+L to re-authenticate"
 Your saved login has expired. Press **Ctrl+L** to log in again. The old credentials are automatically cleaned up.
