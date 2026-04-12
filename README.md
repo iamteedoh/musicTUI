@@ -132,35 +132,33 @@ While your app is in "Development mode" (the default), you must add your Spotify
 
 > Without this step, the app can connect but some features (like viewing playlist tracks) may not work.
 
-### Step 3: Launch musicTUI and paste your Client ID
+### The app walks you through this automatically
 
-musicTUI has a built-in setup wizard — no config files to edit by hand.
+You don't actually need to read the steps above in detail — on first launch, musicTUI runs a built-in onboarding wizard that walks you through creating the Spotify developer app, adds your account, and asks you to paste the Client ID. Just launch it:
 
-1. Open a terminal.
-2. Start the app:
-   ```
-   musicTUI
-   ```
-3. You will see the Home screen: **"Not set up — press Ctrl+L to enter your Spotify Client ID"**.
-4. Press **Ctrl+L**. A popup appears.
-5. Paste the Client ID you copied in Step 1, then press **Enter**.
-6. Your web browser opens to a Spotify login page. Log in and click **"Agree"** to grant access.
-7. After logging in, you will see a page that says **"Login Successful!"** — close that browser tab.
-8. Back in the terminal, your playlists appear in the sidebar. You're connected.
+```
+musicTUI
+```
 
-> Your Client ID and login are saved, so you only do this once. If your session expires later, press Ctrl+L to re-authenticate.
+The wizard hands you the exact field values to paste, opens the Spotify dashboard in your browser when you press **O**, and saves everything for you at the end. After logging in, your playlists appear in the sidebar. That's it.
 
-> Prefer to edit the config file yourself? Create `~/.config/musicTUI/config.toml` (Linux/Mac) or `%APPDATA%\musicTUI\config.toml` (Windows) with:
+The steps in Section 1 and Section 2 are there for reference if you want to understand what's happening, or to set up the app manually.
+
+> If you'd rather edit the config file by hand: create `~/.config/musicTUI/config.toml` (Linux/Mac) or `%APPDATA%\musicTUI\config.toml` (Windows) with:
 > ```toml
 > [spotify]
 > client_id = "YOUR_CLIENT_ID"
 > ```
+> On next launch, musicTUI will skip the wizard and go straight to login.
 
 ---
 
 ## First Launch
 
-Follow the steps in Step 3 above. Subsequent launches skip the setup — just run `musicTUI` and you're connected.
+Just run `musicTUI`. If no Client ID is configured, the onboarding wizard starts automatically. Subsequent launches skip the wizard and go straight to the main app.
+
+- Press **Esc** to skip the wizard — you can re-open it later by pressing **Ctrl+L** on the Home screen.
+- Press **Ctrl+L** after setup to re-authenticate if your session expires.
 
 ---
 
@@ -444,7 +442,8 @@ check_duplicates = true
 |-----|--------|
 | **Ctrl+C** | Quit |
 | **q** | Quit (except while typing in search) |
-| **Ctrl+L** | Log in to Spotify |
+| **Ctrl+L** | Log in to Spotify / re-open setup wizard |
+| **Ctrl+U** | Install an available update (when prompted on the Home screen) |
 | **Tab** | Next panel |
 | **Shift+Tab** | Previous panel |
 | **/** | Quick search |

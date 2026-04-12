@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/audio"
@@ -10,6 +11,7 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/model"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
+	"github.com/iamteedoh/musicTUI/internal/update"
 )
 
 // Navigation
@@ -215,6 +217,40 @@ type ArtworkLoadedMsg struct {
 func FetchArtworkCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		return ArtworkLoadedMsg{Result: components.FetchArtwork(url)}
+	}
+}
+
+// Self-update messages
+type UpdateCheckResultMsg struct {
+	Release *update.Release // nil if no update / check failed
+}
+type UpdateStartedMsg struct{}
+type UpdateAppliedMsg struct{ NewVersion string }
+type UpdateFailedMsg struct{ Err error }
+
+func CheckForUpdateCmd(currentVersion string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		rel, err := update.LatestRelease(ctx)
+		if err != nil || rel == nil {
+			return UpdateCheckResultMsg{Release: nil}
+		}
+		if !update.IsNewer(currentVersion, rel.TagName) {
+			return UpdateCheckResultMsg{Release: nil}
+		}
+		return UpdateCheckResultMsg{Release: rel}
+	}
+}
+
+func ApplyUpdateCmd(rel *update.Release) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := update.DownloadAndApplyLatest(ctx, rel); err != nil {
+			return UpdateFailedMsg{Err: err}
+		}
+		return UpdateAppliedMsg{NewVersion: rel.TagName}
 	}
 }
 

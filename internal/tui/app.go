@@ -21,6 +21,7 @@ import (
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
+	"github.com/iamteedoh/musicTUI/internal/update"
 )
 
 type App struct {
@@ -33,6 +34,7 @@ type App struct {
 	showLyrics         bool // toggle inline lyrics in center panel (default: true)
 	sidebarPlaylistFocus bool // true when sidebar focus is on the playlist section
 	modal    components.Modal
+	onboard  components.Onboard
 	sidebar  components.Sidebar
 	home     components.Home
 	library  components.Library
@@ -58,17 +60,26 @@ type App struct {
 
 	// MPRIS media keys
 	mprisServer *mpris.Server
+
+	// Versioning / self-update
+	version         string
+	latestVersion   string
+	latestRelease   *update.Release
+	updateAvailable bool
+	updating        bool
 }
 
-func NewApp(cfg config.Config, bridgePath string) App {
+func NewApp(cfg config.Config, bridgePath string, version string) App {
 	th := theme.FromName(cfg.Theme)
 	app := App{
 		config:   cfg,
 		theme:    th,
+		version:  version,
 		focus:    model.FocusSidebar,
 		view:     model.ViewHome,
 		sidebar:  components.NewSidebar(),
 		home:     components.NewHome(),
+		onboard:  components.NewOnboard(),
 		library:  components.NewLibrary(),
 		search:   components.NewSearch(),
 		playlist: components.NewPlaylists(),
@@ -84,6 +95,9 @@ func NewApp(cfg config.Config, bridgePath string) App {
 	}
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
+	} else {
+		// First launch with no credentials — walk the user through setup.
+		app.onboard.Start()
 	}
 	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
@@ -101,6 +115,9 @@ func (a App) Init() tea.Cmd {
 	if a.mprisServer != nil {
 		cmds = append(cmds, listenMprisCmd(a.mprisServer))
 	}
+
+	// Async check for a newer release; result arrives as UpdateCheckResultMsg.
+	cmds = append(cmds, CheckForUpdateCmd(a.version))
 
 	return tea.Batch(cmds...)
 }
@@ -274,6 +291,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, FetchPlaylistsCmd(msg.Client, 0)
 	case AuthErrorMsg:
 		a.status = "Auth error: " + msg.Err.Error()
+		return a, nil
+
+	// Self-update
+	case UpdateCheckResultMsg:
+		if msg.Release != nil {
+			a.updateAvailable = true
+			a.latestVersion = msg.Release.TagName
+			a.latestRelease = msg.Release
+			a.home.UpdateAvailable = msg.Release.TagName
+		}
+		return a, nil
+	case UpdateStartedMsg:
+		a.updating = true
+		a.status = "Downloading update..."
+		return a, nil
+	case UpdateAppliedMsg:
+		a.updating = false
+		a.status = fmt.Sprintf("Updated to %s — please restart musicTUI to finish.", msg.NewVersion)
+		return a, nil
+	case UpdateFailedMsg:
+		a.updating = false
+		a.status = "Update failed: " + msg.Err.Error()
 		return a, nil
 
 	// Data loaded
@@ -602,6 +641,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Onboarding wizard takes over input while active
+	if a.onboard.Active {
+		return a.handleOnboardKey(msg)
+	}
 	// Modal captures all input when active
 	if a.modal.Active {
 		return a.handleModalKey(msg)
@@ -611,13 +654,17 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return a, tea.Quit
+	case "ctrl+u":
+		if a.updateAvailable && !a.updating && a.latestRelease != nil {
+			a.updating = true
+			a.status = "Downloading " + a.latestVersion + "..."
+			return a, ApplyUpdateCmd(a.latestRelease)
+		}
+		return a, nil
 	case "ctrl+l":
 		if a.auth == nil {
-			a.modal.ShowInput(
-				"Connect to Spotify",
-				"Paste your Spotify Client ID (from developer.spotify.com/dashboard)",
-				"", "", "",
-				components.ActionConfigureSpotify, "")
+			// Re-open the onboarding wizard for users who escaped it.
+			a.onboard.Start()
 			return a, nil
 		}
 		a.status = "Opening browser for Spotify login..."
@@ -753,6 +800,66 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+
+	switch s {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "esc":
+		a.onboard.Close()
+		return a, nil
+	case "left", "h":
+		a.onboard.Prev()
+		return a, nil
+	}
+
+	if a.onboard.OnFinalStep() {
+		switch s {
+		case "enter":
+			clientID := a.onboard.ClientID()
+			if clientID == "" {
+				a.onboard.Error = "Client ID can't be empty"
+				return a, nil
+			}
+			a.config.Spotify.ClientID = clientID
+			if err := config.Save(a.config); err != nil {
+				a.onboard.Error = "Failed to save config: " + err.Error()
+				return a, nil
+			}
+			a.auth = sp.NewAuth(clientID)
+			a.onboard.Close()
+			a.status = "Opening browser for Spotify login..."
+			return a, a.startInteractiveAuthCmd()
+		case "backspace":
+			a.onboard.Backspace()
+			return a, nil
+		default:
+			if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
+				a.onboard.InputChar(rune(s[0]))
+				return a, nil
+			}
+			for _, r := range msg.Runes {
+				a.onboard.InputChar(r)
+			}
+			return a, nil
+		}
+	}
+
+	// Non-final steps: advance on enter / right, open browser on 'o'.
+	switch s {
+	case "enter", "right", "l":
+		a.onboard.Next()
+		return a, nil
+	case "o", "O":
+		if a.onboard.Step == 1 {
+			openBrowser("https://developer.spotify.com/dashboard")
+		}
+		return a, nil
+	}
+	return a, nil
+}
+
 func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.modal.Kind {
 	case components.ModalConfirm:
@@ -797,21 +904,6 @@ func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch s {
 		case "enter":
 			name := strings.TrimSpace(a.modal.Input1)
-			if a.modal.Action == components.ActionConfigureSpotify {
-				if name == "" {
-					return a, nil
-				}
-				a.config.Spotify.ClientID = name
-				if err := config.Save(a.config); err != nil {
-					a.status = "Failed to save config: " + err.Error()
-					a.modal.Close()
-					return a, nil
-				}
-				a.auth = sp.NewAuth(name)
-				a.modal.Close()
-				a.status = "Opening browser for Spotify login..."
-				return a, a.startInteractiveAuthCmd()
-			}
 			if name != "" && a.client != nil {
 				desc := a.modal.Input2
 				action := a.modal.Action
@@ -1246,6 +1338,10 @@ func (a App) View() string {
 		return ""
 	}
 
+	if a.onboard.Active {
+		return a.onboard.View(a.theme, a.width, a.height)
+	}
+
 	th := a.theme
 	bc := th.Border // all inner panels use this border color
 
@@ -1380,6 +1476,7 @@ func (a App) View() string {
 	switch a.view {
 	case model.ViewHome:
 		a.home.NeedsConfig = a.auth == nil
+		a.home.Version = a.version
 		viewContent = a.home.View(th, centerInnerW, viewH)
 	case model.ViewLibrary:
 		viewContent = a.library.View(th, centerInnerW, viewH)

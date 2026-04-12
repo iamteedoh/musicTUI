@@ -18,6 +18,10 @@ import (
 //go:embed bridge-bin/*
 var bridgeFS embed.FS
 
+// Version is injected at build time via -ldflags "-X main.Version=...".
+// Falls back to "dev" for local builds.
+var Version = "dev"
+
 func findBridge() string {
 	// 1. Try extracting the embedded bridge binary
 	if path := extractEmbeddedBridge(); path != "" {
@@ -92,7 +96,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Warning: player-bridge not found. Audio playback disabled.")
 	}
 
-	app := tui.NewApp(cfg, bridgePath)
+	app := tui.NewApp(cfg, bridgePath, Version)
 
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {

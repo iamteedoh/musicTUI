@@ -8,9 +8,11 @@ import (
 )
 
 type Home struct {
-	Username    string
-	AuthURL     string // shown when waiting for browser auth
-	NeedsConfig bool   // true when no Spotify client_id is configured
+	Username        string
+	AuthURL         string // shown when waiting for browser auth
+	NeedsConfig     bool   // true when no Spotify client_id is configured
+	Version         string // current build version ("dev" for local builds)
+	UpdateAvailable string // latest release tag if newer than Version; empty otherwise
 }
 
 func NewHome() Home {
@@ -90,6 +92,18 @@ func (h Home) View(th theme.Theme, width, height int) string {
 
 	lines = append(lines, "")
 	lines = append(lines, muted.Italic(true).Render("q to quit"))
+
+	// Version + update banner
+	if h.Version != "" {
+		versionLine := muted.Render(h.Version)
+		if h.UpdateAvailable != "" {
+			updateStyle := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+			versionLine = muted.Render(h.Version+"  •  ") +
+				updateStyle.Render("⬆ "+h.UpdateAvailable+" available — press Ctrl+U to update")
+		}
+		lines = append(lines, "")
+		lines = append(lines, versionLine)
+	}
 
 	// Build the content block
 	content := strings.Join(lines, "\n")
