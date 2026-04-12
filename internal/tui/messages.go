@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musictui-go/internal/audio"
@@ -87,10 +88,42 @@ type SearchLoadedMsg struct {
 }
 type DataErrorMsg struct{ Err error }
 
+// Playlist mutation messages
+type PlaylistCreatedMsg struct {
+	Playlist model.Playlist
+}
+type PlaylistUpdatedMsg struct {
+	PlaylistID string
+	NewName    string
+	NewDesc    string
+}
+type PlaylistDeletedMsg struct {
+	PlaylistID string
+}
+type TrackAddedToPlaylistMsg struct {
+	PlaylistID string
+}
+type TrackRemovedFromPlaylistMsg struct {
+	PlaylistID string
+	TrackURI   string
+}
+type TrackMovedMsg struct {
+	FromPlaylistID string
+	ToPlaylistID   string
+	TrackURI       string
+}
+type DuplicatesConsolidatedMsg struct {
+	MergedCount  int
+	DeletedCount int
+}
+type EmptyPlaylistsDeletedMsg struct {
+	DeletedCount int
+}
+
 // Commands that fetch data asynchronously
 func FetchLibraryCmd(client *sp.Client, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetSavedTracks(context.Background(), offset, 10)
+		page, err := client.GetSavedTracks(context.Background(), offset, 50)
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -100,7 +133,7 @@ func FetchLibraryCmd(client *sp.Client, offset int) tea.Cmd {
 
 func FetchPlaylistsCmd(client *sp.Client, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetPlaylists(context.Background(), offset, 10)
+		page, err := client.GetPlaylists(context.Background(), offset, 50)
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -110,7 +143,7 @@ func FetchPlaylistsCmd(client *sp.Client, offset int) tea.Cmd {
 
 func FetchPlaylistTracksCmd(client *sp.Client, playlistID string, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetPlaylistTracks(context.Background(), playlistID, offset, 10)
+		page, err := client.GetPlaylistTracks(context.Background(), playlistID, offset, 50)
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -120,7 +153,7 @@ func FetchPlaylistTracksCmd(client *sp.Client, playlistID string, offset int) te
 
 func FetchArtistAlbumsCmd(client *sp.Client, artist model.Artist, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetArtistAlbums(context.Background(), artist.ID, offset, 10)
+		page, err := client.GetArtistAlbums(context.Background(), artist.ID, offset, 50)
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -130,7 +163,7 @@ func FetchArtistAlbumsCmd(client *sp.Client, artist model.Artist, offset int) te
 
 func FetchAlbumTracksCmd(client *sp.Client, album model.Album, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetAlbumTracks(context.Background(), album.ID, offset, 10)
+		page, err := client.GetAlbumTracks(context.Background(), album.ID, offset, 50)
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -206,5 +239,159 @@ func ListenForAudioEvents(engine *audio.Engine) tea.Cmd {
 			return AudioEventMsg{Event: audio.Event{Kind: "stopped"}}
 		}
 		return AudioEventMsg{Event: ev}
+	}
+}
+
+// Playlist mutation commands
+func CreatePlaylistCmd(client *sp.Client, name, description string) tea.Cmd {
+	return func() tea.Msg {
+		pl, err := client.CreatePlaylist(context.Background(), name, description, false)
+		if err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return PlaylistCreatedMsg{Playlist: pl}
+	}
+}
+
+func UpdatePlaylistCmd(client *sp.Client, playlistID, name, description string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.UpdatePlaylistDetails(context.Background(), playlistID, name, description); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return PlaylistUpdatedMsg{PlaylistID: playlistID, NewName: name, NewDesc: description}
+	}
+}
+
+func DeletePlaylistCmd(client *sp.Client, playlistID string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.DeletePlaylist(context.Background(), playlistID); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return PlaylistDeletedMsg{PlaylistID: playlistID}
+	}
+}
+
+func AddTrackToPlaylistCmd(client *sp.Client, playlistID, trackURI string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.AddTracksToPlaylist(context.Background(), playlistID, []string{trackURI}); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return TrackAddedToPlaylistMsg{PlaylistID: playlistID}
+	}
+}
+
+func RemoveTrackFromPlaylistCmd(client *sp.Client, playlistID, trackURI string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.RemoveTracksFromPlaylist(context.Background(), playlistID, []string{trackURI}); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return TrackRemovedFromPlaylistMsg{PlaylistID: playlistID, TrackURI: trackURI}
+	}
+}
+
+func MoveTrackCmd(client *sp.Client, fromPlaylistID, toPlaylistID, trackURI string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.AddTracksToPlaylist(context.Background(), toPlaylistID, []string{trackURI}); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		if err := client.RemoveTracksFromPlaylist(context.Background(), fromPlaylistID, []string{trackURI}); err != nil {
+			return DataErrorMsg{Err: err}
+		}
+		return TrackMovedMsg{FromPlaylistID: fromPlaylistID, ToPlaylistID: toPlaylistID, TrackURI: trackURI}
+	}
+}
+
+// ConsolidateDuplicatesCmd merges playlists with identical names.
+// For each group of duplicates: fetches all tracks, deduplicates by track ID
+// (different versions/lengths of a song have different IDs), adds unique tracks
+// to the first playlist, and deletes the rest.
+func ConsolidateDuplicatesCmd(client *sp.Client, groups [][]model.Playlist) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var mergedCount, deletedCount int
+
+		for _, group := range groups {
+			if len(group) < 2 {
+				continue
+			}
+			keep := group[0]
+			duplicates := group[1:]
+
+			seen := make(map[string]bool)
+
+			// Fetch tracks from the keeper
+			offset := 0
+			for {
+				page, err := client.GetPlaylistTracks(ctx, keep.ID, offset, 50)
+				if err != nil {
+					break
+				}
+				for _, t := range page.Items {
+					seen[t.ID] = true
+				}
+				if uint32(offset+len(page.Items)) >= page.Total || len(page.Items) == 0 {
+					break
+				}
+				offset += len(page.Items)
+			}
+
+			// Fetch tracks from duplicates
+			var newURIs []string
+			for _, dup := range duplicates {
+				offset = 0
+				for {
+					page, err := client.GetPlaylistTracks(ctx, dup.ID, offset, 50)
+					if err != nil {
+						break
+					}
+					for _, t := range page.Items {
+						if !seen[t.ID] {
+							seen[t.ID] = true
+							newURIs = append(newURIs, t.URI)
+						}
+					}
+					if uint32(offset+len(page.Items)) >= page.Total || len(page.Items) == 0 {
+						break
+					}
+					offset += len(page.Items)
+				}
+			}
+
+			// Add unique tracks to the keeper
+			for i := 0; i < len(newURIs); i += 100 {
+				end := i + 100
+				if end > len(newURIs) {
+					end = len(newURIs)
+				}
+				if err := client.AddTracksToPlaylist(ctx, keep.ID, newURIs[i:end]); err != nil {
+					return DataErrorMsg{Err: fmt.Errorf("adding tracks to %s: %w", keep.Name, err)}
+				}
+			}
+
+			// Delete the duplicate playlists
+			for _, dup := range duplicates {
+				if err := client.DeletePlaylist(ctx, dup.ID); err != nil {
+					return DataErrorMsg{Err: fmt.Errorf("deleting duplicate %s: %w", dup.Name, err)}
+				}
+				deletedCount++
+			}
+			mergedCount++
+		}
+
+		return DuplicatesConsolidatedMsg{MergedCount: mergedCount, DeletedCount: deletedCount}
+	}
+}
+
+func DeleteEmptyPlaylistsCmd(client *sp.Client, playlists []model.Playlist) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var count int
+		for _, pl := range playlists {
+			if err := client.DeletePlaylist(ctx, pl.ID); err != nil {
+				return DataErrorMsg{Err: fmt.Errorf("deleting %s: %w", pl.Name, err)}
+			}
+			count++
+		}
+		return EmptyPlaylistsDeletedMsg{DeletedCount: count}
 	}
 }

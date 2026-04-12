@@ -12,19 +12,21 @@ type SpotifyConfig struct {
 }
 
 type Config struct {
-	Theme      string        `toml:"theme"`
-	TickRateMs int           `toml:"tick_rate_ms"`
-	FrameRate  int           `toml:"frame_rate"`
-	Volume     int           `toml:"volume"`
-	Spotify    SpotifyConfig `toml:"spotify"`
+	Theme               string        `toml:"theme"`
+	TickRateMs          int           `toml:"tick_rate_ms"`
+	FrameRate           int           `toml:"frame_rate"`
+	Volume              int           `toml:"volume"`
+	CheckDuplicates     bool          `toml:"check_duplicates"`
+	Spotify             SpotifyConfig `toml:"spotify"`
 }
 
 func Default() Config {
 	return Config{
-		Theme:      "nord",
-		TickRateMs: 33,
-		FrameRate:  60,
-		Volume:     75,
+		Theme:           "nord",
+		TickRateMs:      33,
+		FrameRate:       60,
+		Volume:          75,
+		CheckDuplicates: true,
 	}
 }
 

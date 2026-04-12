@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 // bridgeCommand is sent to the Rust player-bridge via stdin.
@@ -82,14 +81,7 @@ func (e *Engine) ensureBridge() error {
 	}
 
 	e.cmd = exec.Command(e.bridgePath)
-
-	// Fully isolate the subprocess from the terminal:
-	// - Create a new process group so it can't access our controlling terminal
-	// - Pipe stdin/stderr for our JSON protocol
-	// - Redirect stdout to /dev/null (librespot logs)
-	e.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // new process group — cannot steal terminal
-	}
+	setSysProcAttr(e.cmd)
 
 	var err error
 	e.stdin, err = e.cmd.StdinPipe()
@@ -179,6 +171,21 @@ func (e *Engine) readEvents(r io.Reader) {
 			TrackID:    ev.TrackID,
 		})
 	}
+
+	// Bridge exited — clean up so ensureBridge() can restart it
+	e.mu.Lock()
+	if e.stdin != nil {
+		e.stdin.Close()
+		e.stdin = nil
+	}
+	if e.cmd != nil && e.cmd.Process != nil {
+		_ = e.cmd.Wait()
+		e.cmd = nil
+	}
+	e.started = false
+	e.playing.Store(false)
+	e.mu.Unlock()
+
 	e.emit(Event{Kind: "stopped"})
 }
 
@@ -193,6 +200,11 @@ func (e *Engine) sendCmd(cmd bridgeCommand) error {
 		return err
 	}
 	_, err = fmt.Fprintf(e.stdin, "%s\n", data)
+	if err != nil {
+		// Bridge stdin is broken — mark as not started so next PlayTrack restarts it
+		e.stdin = nil
+		e.started = false
+	}
 	return err
 }
 

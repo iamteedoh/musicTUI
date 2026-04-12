@@ -1,0 +1,28 @@
+# Build output
+dist/
+musictui
+musictui-go
+player-bridge
+*.exe
+
+# Rust build artifacts
+bridge/target/
+
+# Debug logs
+music-tui-debug.log
+*.log
+
+# Credentials and secrets — NEVER commit these
+credentials.json
+*.token
+*.key
+*.pem
+.env
+.env.*
+
+# Config with potential secrets
+config.toml
+
+# OS files
+.DS_Store
+Thumbs.db

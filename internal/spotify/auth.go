@@ -202,6 +202,15 @@ func CachedToken() (*oauth2.Token, error) {
 	return tok, nil
 }
 
+// ClearToken removes the cached token from disk.
+func ClearToken() {
+	path, err := config.CredentialsPath()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(path)
+}
+
 // SaveToken caches a token to disk in Go oauth2 format.
 func SaveToken(tok *oauth2.Token) error {
 	path, err := config.CredentialsPath()

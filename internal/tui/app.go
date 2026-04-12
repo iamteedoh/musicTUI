@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/iamteedoh/musictui-go/internal/audio"
 	"github.com/iamteedoh/musictui-go/internal/config"
 	"github.com/iamteedoh/musictui-go/internal/model"
+	"github.com/iamteedoh/musictui-go/internal/mpris"
 	sp "github.com/iamteedoh/musictui-go/internal/spotify"
 	"github.com/iamteedoh/musictui-go/internal/theme"
 	"github.com/iamteedoh/musictui-go/internal/tui/components"
@@ -24,9 +27,11 @@ type App struct {
 	theme    theme.Theme
 	width    int
 	height   int
-	focus      model.FocusMode
-	view       model.View
-	showLyrics bool // toggle inline lyrics in center panel (default: true)
+	focus              model.FocusMode
+	view               model.View
+	showLyrics         bool // toggle inline lyrics in center panel (default: true)
+	sidebarPlaylistFocus bool // true when sidebar focus is on the playlist section
+	modal    components.Modal
 	sidebar  components.Sidebar
 	home     components.Home
 	library  components.Library
@@ -36,6 +41,7 @@ type App struct {
 	viz      components.MiniVisualizer
 	lyrics   components.Lyrics
 	artwork  components.Artwork
+	settings components.Settings
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
@@ -48,6 +54,9 @@ type App struct {
 	// Audio
 	engine     *audio.Engine
 	bridgePath string
+
+	// MPRIS media keys
+	mprisServer *mpris.Server
 }
 
 func NewApp(cfg config.Config, bridgePath string) App {
@@ -66,11 +75,16 @@ func NewApp(cfg config.Config, bridgePath string) App {
 		viz:      components.NewMiniVisualizer(),
 		lyrics:   components.NewLyrics(),
 		artwork:  components.NewArtwork(),
+		settings: components.NewSettings(),
 		showLyrics: true,
 		playback:   model.PlaybackState{Volume: cfg.Volume},
 		queue:      model.NewQueue(),
 		bridgePath: bridgePath,
 	}
+	if cfg.Spotify.ClientID != "" {
+		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
+	}
+	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
 }
 
@@ -82,7 +96,24 @@ func (a App) Init() tea.Cmd {
 		cmds = append(cmds, a.tryCachedAuthCmd())
 	}
 
+	// Start MPRIS media key listener
+	if a.mprisServer != nil {
+		cmds = append(cmds, listenMprisCmd(a.mprisServer))
+	}
+
 	return tea.Batch(cmds...)
+}
+
+type mprisCommandMsg struct{ Cmd mpris.MediaCommand }
+
+func listenMprisCmd(srv *mpris.Server) tea.Cmd {
+	return func() tea.Msg {
+		cmd, ok := <-srv.Commands()
+		if !ok {
+			return nil
+		}
+		return mprisCommandMsg{Cmd: cmd}
+	}
 }
 
 func tickCmd() tea.Cmd {
@@ -106,10 +137,12 @@ func (a App) tryCachedAuthCmd() tea.Cmd {
 
 		// The httpClient auto-refreshes via oauth2 transport.
 		// Make a test call to trigger refresh if needed.
-		client := sp.NewClient(spotifylib.New(httpClient))
+		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
 		username, err := client.FetchUsername(context.Background())
 		if err != nil {
-			return AuthErrorMsg{Err: fmt.Errorf("auth failed (try Ctrl+L to re-authenticate): %w", err)}
+			// Token is stale/revoked — clear it and prompt for fresh login
+			sp.ClearToken()
+			return StatusMsg("Session expired — press Ctrl+L to re-authenticate")
 		}
 
 		// Save the potentially refreshed token and grab access token for librespot
@@ -125,10 +158,80 @@ func (a App) tryCachedAuthCmd() tea.Cmd {
 	}
 }
 
+func (a App) startInteractiveAuthCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Clear stale credentials so the next startup doesn't try a revoked token
+		sp.ClearToken()
+
+		url := a.auth.AuthURL()
+
+		// Try to open browser
+		if err := exec.Command("xdg-open", url).Start(); err != nil {
+			// Fallback: user will see URL in status
+			_ = err
+		}
+
+		return AuthURLMsg{URL: url}
+	}
+}
+
+func (a App) waitForAuthCallbackCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		tok, err := a.auth.WaitForCallback(ctx)
+		if err != nil {
+			return AuthErrorMsg{Err: fmt.Errorf("login failed: %w", err)}
+		}
+
+		httpClient := a.auth.HTTPClient(tok)
+		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
+		username, err := client.FetchUsername(context.Background())
+		if err != nil {
+			return AuthErrorMsg{Err: fmt.Errorf("failed to fetch user: %w", err)}
+		}
+
+		return AuthSuccessMsg{Client: client, Username: username, AccessToken: tok.AccessToken}
+	}
+}
+
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return a.handleKey(msg)
+	case mprisCommandMsg:
+		var cmds []tea.Cmd
+		switch msg.Cmd {
+		case mpris.CmdPlayPause:
+			if a.engine != nil {
+				if a.playback.IsPlaying {
+					_ = a.engine.Pause()
+				} else {
+					_ = a.engine.Resume()
+				}
+			}
+		case mpris.CmdNext:
+			if next := a.queue.Next(); next != nil {
+				cmds = append(cmds, func() tea.Msg { return PlayTrackMsg{Track: *next} })
+			}
+		case mpris.CmdPrevious:
+			if prev := a.queue.Previous(); prev != nil {
+				cmds = append(cmds, func() tea.Msg { return PlayTrackMsg{Track: *prev} })
+			}
+		case mpris.CmdStop:
+			if a.engine != nil {
+				_ = a.engine.Stop()
+			}
+		}
+		// Re-listen for next MPRIS command
+		if a.mprisServer != nil {
+			cmds = append(cmds, listenMprisCmd(a.mprisServer))
+		}
+		if len(cmds) > 0 {
+			return a, tea.Batch(cmds...)
+		}
+		return a, nil
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -139,9 +242,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tickCmd()
 
 	// Auth
+	case AuthURLMsg:
+		a.status = "Login URL opened — complete auth in browser"
+		a.home.AuthURL = msg.URL
+		return a, a.waitForAuthCallbackCmd()
 	case AuthSuccessMsg:
 		a.client = msg.Client
 		a.home.Username = msg.Username
+		a.home.AuthURL = ""
 		a.accessToken = msg.AccessToken
 		a.status = "" // Auth info shown in home view and title bar
 
@@ -164,11 +272,49 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PlaylistsLoadedMsg:
 		a.playlist.Items = append(a.playlist.Items, msg.Playlists...)
 		a.playlist.Total = msg.Total
+		// Auto-paginate: fetch next page if more playlists exist
+		if uint32(len(a.playlist.Items)) < msg.Total {
+			return a, FetchPlaylistsCmd(a.client, len(a.playlist.Items))
+		}
+		// Sort alphabetically once all pages are loaded
+		sort.Slice(a.playlist.Items, func(i, j int) bool {
+			return strings.ToLower(a.playlist.Items[i].Name) < strings.ToLower(a.playlist.Items[j].Name)
+		})
 		a.playlist.Loading = false
+
+		// Check for duplicate playlist names (if enabled in settings)
+		if a.config.CheckDuplicates {
+			if groups := a.findDuplicatePlaylists(); len(groups) > 0 {
+				var names []string
+				for _, g := range groups {
+					names = append(names, fmt.Sprintf("\"%s\" (%d copies)", g[0].Name, len(g)))
+				}
+				dupMsg := "Duplicate playlists found:\n\n"
+				for _, n := range names {
+					dupMsg += "  " + n + "\n"
+				}
+				dupMsg += "\nMerge duplicates into one playlist each? (y/n)"
+				a.modal.ShowConfirm("Duplicate Playlists Found", dupMsg, components.ActionConsolidateDuplicates, "")
+				return a, nil
+			}
+			// Check for empty playlists
+			if empty := a.findEmptyPlaylists(); len(empty) > 0 {
+				emptyMsg := fmt.Sprintf("%d empty playlist(s) found:\n\n", len(empty))
+				for _, pl := range empty {
+					emptyMsg += fmt.Sprintf("  \"%s\"\n", pl.Name)
+				}
+				emptyMsg += "\nDelete all empty playlists? (y/n)"
+				a.modal.ShowConfirm("Empty Playlists Found", emptyMsg, components.ActionDeleteEmptyPlaylists, "")
+			}
+		}
 		return a, nil
 	case PlaylistTracksLoadedMsg:
 		a.playlist.Tracks = append(a.playlist.Tracks, msg.Tracks...)
 		a.playlist.TracksTotal = msg.Total
+		// Auto-paginate: fetch next page if more tracks exist
+		if uint32(len(a.playlist.Tracks)) < msg.Total {
+			return a, FetchPlaylistTracksCmd(a.client, msg.PlaylistID, len(a.playlist.Tracks))
+		}
 		a.playlist.TracksLoading = false
 		return a, nil
 	case SearchLoadedMsg:
@@ -225,11 +371,123 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.artwork.SetFullImage(msg.Result.Img, msg.Result.URL)
 		}
 		return a, nil
+	// Playlist mutations
+	case PlaylistCreatedMsg:
+		a.playlist.Items = append(a.playlist.Items, msg.Playlist)
+		a.playlist.Total++
+		sort.Slice(a.playlist.Items, func(i, j int) bool {
+			return strings.ToLower(a.playlist.Items[i].Name) < strings.ToLower(a.playlist.Items[j].Name)
+		})
+		a.status = "Created playlist: " + msg.Playlist.Name
+		return a, nil
+	case PlaylistUpdatedMsg:
+		for i, pl := range a.playlist.Items {
+			if pl.ID == msg.PlaylistID {
+				a.playlist.Items[i].Name = msg.NewName
+				a.playlist.Items[i].Description = msg.NewDesc
+				break
+			}
+		}
+		sort.Slice(a.playlist.Items, func(i, j int) bool {
+			return strings.ToLower(a.playlist.Items[i].Name) < strings.ToLower(a.playlist.Items[j].Name)
+		})
+		if a.playlist.CurrentID == msg.PlaylistID {
+			a.playlist.CurrentName = msg.NewName
+		}
+		a.status = "Updated playlist: " + msg.NewName
+		return a, nil
+	case PlaylistDeletedMsg:
+		for i, pl := range a.playlist.Items {
+			if pl.ID == msg.PlaylistID {
+				a.playlist.Items = append(a.playlist.Items[:i], a.playlist.Items[i+1:]...)
+				a.playlist.Total--
+				if a.playlist.Selected >= len(a.playlist.Items) && a.playlist.Selected > 0 {
+					a.playlist.Selected--
+				}
+				break
+			}
+		}
+		if a.playlist.CurrentID == msg.PlaylistID {
+			a.playlist.Back()
+		}
+		a.status = "Playlist removed"
+		return a, nil
+	case TrackAddedToPlaylistMsg:
+		for i, pl := range a.playlist.Items {
+			if pl.ID == msg.PlaylistID {
+				a.playlist.Items[i].TrackCount++
+				break
+			}
+		}
+		a.status = "Track added to playlist"
+		return a, nil
+	case TrackRemovedFromPlaylistMsg:
+		for i, t := range a.playlist.Tracks {
+			if t.URI == msg.TrackURI {
+				a.playlist.Tracks = append(a.playlist.Tracks[:i], a.playlist.Tracks[i+1:]...)
+				if a.playlist.TracksTotal > 0 {
+					a.playlist.TracksTotal--
+				}
+				if a.playlist.TrackSelected >= len(a.playlist.Tracks) && a.playlist.TrackSelected > 0 {
+					a.playlist.TrackSelected--
+				}
+				break
+			}
+		}
+		a.status = "Track removed from playlist"
+		return a, nil
+	case TrackMovedMsg:
+		// Remove from source playlist's local tracks
+		for i, t := range a.playlist.Tracks {
+			if t.URI == msg.TrackURI {
+				a.playlist.Tracks = append(a.playlist.Tracks[:i], a.playlist.Tracks[i+1:]...)
+				if a.playlist.TracksTotal > 0 {
+					a.playlist.TracksTotal--
+				}
+				if a.playlist.TrackSelected >= len(a.playlist.Tracks) && a.playlist.TrackSelected > 0 {
+					a.playlist.TrackSelected--
+				}
+				break
+			}
+		}
+		// Update track counts
+		for i, pl := range a.playlist.Items {
+			if pl.ID == msg.FromPlaylistID && a.playlist.Items[i].TrackCount > 0 {
+				a.playlist.Items[i].TrackCount--
+			}
+			if pl.ID == msg.ToPlaylistID {
+				a.playlist.Items[i].TrackCount++
+			}
+		}
+		a.status = "Track moved to playlist"
+		return a, nil
+	case DuplicatesConsolidatedMsg:
+		a.playlist.Items = nil
+		a.playlist.Total = 0
+		a.playlist.Loading = true
+		a.status = fmt.Sprintf("Consolidated %d duplicate group(s), removed %d playlist(s)", msg.MergedCount, msg.DeletedCount)
+		if a.client != nil {
+			return a, FetchPlaylistsCmd(a.client, 0)
+		}
+		return a, nil
+	case EmptyPlaylistsDeletedMsg:
+		a.playlist.Items = nil
+		a.playlist.Total = 0
+		a.playlist.Loading = true
+		a.status = fmt.Sprintf("Deleted %d empty playlist(s)", msg.DeletedCount)
+		if a.client != nil {
+			return a, FetchPlaylistsCmd(a.client, 0)
+		}
+		return a, nil
+
 	case DataErrorMsg:
 		a.status = "Error: " + msg.Err.Error()
 		a.library.Loading = false
 		a.playlist.Loading = false
-		a.playlist.TracksLoading = false
+		if a.playlist.TracksLoading {
+			a.playlist.TracksLoading = false
+			a.playlist.Error = msg.Err.Error()
+		}
 		a.search.Loading = false
 		return a, nil
 	case StatusMsg:
@@ -321,7 +579,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "loading":
 			a.status = "Loading track..."
 		}
-		if a.engine != nil {
+		// Re-register the event listener only if the bridge is still alive.
+		// After bridge death, readEvents() resets Started() to false —
+		// a new listener will be registered when PlayTrack restarts the bridge.
+		if a.engine != nil && a.engine.Started() {
 			return a, ListenForAudioEvents(a.engine)
 		}
 		return a, nil
@@ -330,10 +591,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Modal captures all input when active
+	if a.modal.Active {
+		return a.handleModalKey(msg)
+	}
+
 	// Global keys
 	switch msg.String() {
 	case "ctrl+c":
 		return a, tea.Quit
+	case "ctrl+l":
+		if a.auth == nil {
+			a.status = "No Spotify client_id configured"
+			return a, nil
+		}
+		a.status = "Opening browser for Spotify login..."
+		return a, a.startInteractiveAuthCmd()
 	case "q":
 		if a.view != model.ViewSearch || !a.isSearchInputFocused() {
 			return a, tea.Quit
@@ -465,13 +738,146 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch a.modal.Kind {
+	case components.ModalConfirm:
+		switch msg.String() {
+		case "y", "Y":
+			switch a.modal.Action {
+			case components.ActionDeletePlaylist:
+				id := a.modal.TargetID
+				a.modal.Close()
+				if a.client != nil {
+					return a, DeletePlaylistCmd(a.client, id)
+				}
+			case components.ActionRemoveTrack:
+				id := a.modal.TargetID
+				uri := a.modal.TrackURI
+				a.modal.Close()
+				if a.client != nil {
+					return a, RemoveTrackFromPlaylistCmd(a.client, id, uri)
+				}
+			case components.ActionConsolidateDuplicates:
+				groups := a.findDuplicatePlaylists()
+				a.modal.Close()
+				a.status = "Consolidating duplicate playlists..."
+				if a.client != nil && len(groups) > 0 {
+					return a, ConsolidateDuplicatesCmd(a.client, groups)
+				}
+			case components.ActionDeleteEmptyPlaylists:
+				empty := a.findEmptyPlaylists()
+				a.modal.Close()
+				a.status = "Deleting empty playlists..."
+				if a.client != nil && len(empty) > 0 {
+					return a, DeleteEmptyPlaylistsCmd(a.client, empty)
+				}
+			}
+			a.modal.Close()
+		case "n", "N", "esc":
+			a.modal.Close()
+		}
+
+	case components.ModalInput:
+		s := msg.String()
+		switch s {
+		case "enter":
+			name := strings.TrimSpace(a.modal.Input1)
+			if name != "" && a.client != nil {
+				desc := a.modal.Input2
+				action := a.modal.Action
+				targetID := a.modal.TargetID
+				a.modal.Close()
+				switch action {
+				case components.ActionCreatePlaylist:
+					return a, CreatePlaylistCmd(a.client, name, desc)
+				case components.ActionEditPlaylist:
+					return a, UpdatePlaylistCmd(a.client, targetID, name, desc)
+				}
+			}
+		case "esc":
+			a.modal.Close()
+		case "tab":
+			a.modal.TabField()
+		case "backspace":
+			a.modal.Backspace()
+		default:
+			if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
+				a.modal.InputChar(rune(s[0]))
+			} else if len(msg.Runes) > 0 {
+				for _, r := range msg.Runes {
+					a.modal.InputChar(r)
+				}
+			}
+		}
+
+	case components.ModalPicker:
+		switch msg.String() {
+		case "j", "down":
+			a.modal.Down()
+		case "k", "up":
+			a.modal.Up()
+		case "enter":
+			if a.modal.PickerSelected < len(a.modal.PickerItems) && a.client != nil {
+				pl := a.modal.PickerItems[a.modal.PickerSelected]
+				uri := a.modal.TrackURI
+				action := a.modal.Action
+				fromID := a.modal.TargetID
+				a.modal.Close()
+				if action == components.ActionMoveTrack {
+					return a, MoveTrackCmd(a.client, fromID, pl.ID, uri)
+				}
+				return a, AddTrackToPlaylistCmd(a.client, pl.ID, uri)
+			}
+		case "esc":
+			a.modal.Close()
+		}
+	}
+	return a, nil
+}
+
+// findDuplicatePlaylists returns groups of playlists that share the same name.
+func (a App) findDuplicatePlaylists() [][]model.Playlist {
+	byName := make(map[string][]model.Playlist)
+	for _, pl := range a.playlist.Items {
+		key := strings.ToLower(strings.TrimSpace(pl.Name))
+		byName[key] = append(byName[key], pl)
+	}
+	var groups [][]model.Playlist
+	for _, group := range byName {
+		if len(group) >= 2 {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+func (a App) findEmptyPlaylists() []model.Playlist {
+	var empty []model.Playlist
+	for _, pl := range a.playlist.Items {
+		if pl.TrackCount == 0 {
+			empty = append(empty, pl)
+		}
+	}
+	return empty
+}
+
 func (a App) isSearchInputFocused() bool {
 	return a.view == model.ViewSearch && !a.search.ResultsFocused
 }
 
 func (a App) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.sidebarPlaylistFocus {
+		return a.handleSidebarPlaylistKey(msg)
+	}
 	switch msg.String() {
 	case "j", "down":
+		if a.sidebar.Selected >= len(a.sidebar.Items)-1 && len(a.playlist.Items) > 0 {
+			// Past last nav item → enter playlist section
+			a.sidebarPlaylistFocus = true
+			a.view = model.ViewPlaylists
+			a.playlist.Mode = components.PlaylistModeList
+			return a, nil
+		}
 		a.sidebar.Down()
 		a.view = a.sidebar.CurrentView()
 		return a, a.onViewEnter()
@@ -482,7 +888,72 @@ func (a App) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "l":
 		a.view = a.sidebar.CurrentView()
 		a.focus = model.FocusContent
+		if a.view == model.ViewSearch {
+			a.search.ResultsFocused = false
+		}
 		return a, a.onViewEnter()
+	case "d", "x", "c", "e":
+		// Forward playlist management keys when on the Playlists nav item
+		if a.view == model.ViewPlaylists && len(a.playlist.Items) > 0 {
+			a.sidebarPlaylistFocus = true
+			return a.handleSidebarPlaylistKey(msg)
+		}
+	}
+	return a, nil
+}
+
+func (a App) handleSidebarPlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		if a.playlist.Selected < len(a.playlist.Items)-1 {
+			a.playlist.Selected++
+		}
+	case "k", "up":
+		if a.playlist.Selected <= 0 {
+			// Back to navigation section
+			a.sidebarPlaylistFocus = false
+			return a, nil
+		}
+		a.playlist.Selected--
+	case "enter", "l":
+		if a.playlist.Selected < len(a.playlist.Items) {
+			a.view = model.ViewPlaylists
+			a.focus = model.FocusContent
+			a.sidebarPlaylistFocus = false
+			// Open the selected playlist's tracks
+			pl := a.playlist.Items[a.playlist.Selected]
+			a.playlist.Mode = components.PlaylistModeTracks
+			a.playlist.CurrentID = pl.ID
+			a.playlist.CurrentName = pl.Name
+			a.playlist.Tracks = nil
+			a.playlist.TrackSelected = 0
+			a.playlist.TracksLoading = true
+			a.playlist.Error = ""
+			if a.client != nil {
+				return a, FetchPlaylistTracksCmd(a.client, pl.ID, 0)
+			}
+		}
+	case "d", "x":
+		if a.playlist.Selected < len(a.playlist.Items) {
+			pl := a.playlist.Items[a.playlist.Selected]
+			if pl.TrackCount == 0 {
+				// Empty playlist — delete immediately
+				if a.client != nil {
+					return a, DeletePlaylistCmd(a.client, pl.ID)
+				}
+			} else {
+				a.modal.ShowConfirm("Delete Playlist",
+					fmt.Sprintf("Remove \"%s\" (%d tracks) from your library? (y/n)", pl.Name, pl.TrackCount),
+					components.ActionDeletePlaylist, pl.ID)
+			}
+		}
+	case "c":
+		a.modal.ShowInput("Create Playlist", "Name", "", "Description (optional)", "", components.ActionCreatePlaylist, "")
+	case "e":
+		if a.playlist.Selected < len(a.playlist.Items) {
+			pl := a.playlist.Items[a.playlist.Selected]
+			a.modal.ShowInput("Edit Playlist", "Name", pl.Name, "Description", pl.Description, components.ActionEditPlaylist, pl.ID)
+		}
 	}
 	return a, nil
 }
@@ -524,6 +995,21 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "h":
 			a.focus = model.FocusSidebar
 		}
+	case model.ViewSettings:
+		switch msg.String() {
+		case "j", "down":
+			a.settings.Down()
+		case "k", "up":
+			a.settings.Up()
+		case "enter":
+			switch a.settings.SelectedKey() {
+			case "check_duplicates":
+				a.config.CheckDuplicates = !a.config.CheckDuplicates
+				_ = config.Save(a.config)
+			}
+		case "esc", "h":
+			a.focus = model.FocusSidebar
+		}
 	default:
 		switch msg.String() {
 		case "esc", "h":
@@ -548,6 +1034,10 @@ func (a App) handleLibraryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := a.library.Selected
 			tracks := a.library.Tracks
 			return a, func() tea.Msg { return PlayQueueMsg{Tracks: tracks, StartIdx: idx} }
+		}
+	case "a":
+		if t := a.library.SelectedTrack(); t != nil && len(a.playlist.Items) > 0 {
+			a.modal.ShowPicker("Add to Playlist", a.playlist.Items, t.URI)
 		}
 	case "esc", "h":
 		a.focus = model.FocusSidebar
@@ -590,6 +1080,13 @@ func (a App) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			case "playlist":
 				a.status = "Playlist drill-down coming soon"
+			}
+		case "a":
+			kind, item := a.search.SelectedItem()
+			if kind == "track" {
+				if t, ok := item.(model.Track); ok && len(a.playlist.Items) > 0 {
+					a.modal.ShowPicker("Add to Playlist", a.playlist.Items, t.URI)
+				}
 			}
 		case "esc":
 			// Try to go back in search history before exiting
@@ -637,8 +1134,32 @@ func (a App) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		a.playlist.Up()
 	case "enter":
-		if id, ok := a.playlist.Select(); ok && a.client != nil {
+		if a.playlist.Mode == components.PlaylistModeTracks {
+			// Play selected track, queue all playlist tracks
+			if t := a.playlist.SelectedTrack(); t != nil {
+				tracks := a.playlist.Tracks
+				idx := a.playlist.TrackSelected
+				return a, func() tea.Msg { return PlayQueueMsg{Tracks: tracks, StartIdx: idx} }
+			}
+		} else if id, ok := a.playlist.Select(); ok && a.client != nil {
 			return a, FetchPlaylistTracksCmd(a.client, id, 0)
+		}
+	case "d", "x":
+		if a.playlist.Mode == components.PlaylistModeTracks {
+			if t := a.playlist.SelectedTrack(); t != nil {
+				a.modal.ShowConfirm("Remove Track",
+					fmt.Sprintf("Remove \"%s\" from this playlist? (y/n)", t.Name),
+					components.ActionRemoveTrack, a.playlist.CurrentID)
+				a.modal.TrackURI = t.URI
+			}
+		}
+	case "m":
+		if a.playlist.Mode == components.PlaylistModeTracks {
+			if t := a.playlist.SelectedTrack(); t != nil && len(a.playlist.Items) > 0 {
+				a.modal.ShowPicker("Move to Playlist", a.playlist.Items, t.URI)
+				a.modal.Action = components.ActionMoveTrack
+				a.modal.TargetID = a.playlist.CurrentID // source playlist
+			}
 		}
 	case "esc", "h":
 		if !a.playlist.Back() {
@@ -750,7 +1271,7 @@ func (a App) View() string {
 			if i > startIdx {
 				plContent += "\n"
 			}
-			if i == a.playlist.Selected && a.view == model.ViewPlaylists {
+			if i == a.playlist.Selected && (a.sidebarPlaylistFocus || a.view == model.ViewPlaylists) {
 				plContent += lipgloss.NewStyle().Foreground(th.Accent).Bold(true).
 					Render(fmt.Sprintf(" ▸%s", name))
 			} else {
@@ -811,6 +1332,20 @@ func (a App) View() string {
 		viewH = 4
 	}
 
+	// Reserve space for inline lyrics when shown
+	inlineLyrics := a.showLyrics && a.playback.Track != nil && a.view != model.ViewLyrics
+	lyricsH := 0
+	if inlineLyrics {
+		lyricsH = viewH / 3
+		if lyricsH < 4 {
+			lyricsH = 4
+		}
+		viewH -= lyricsH + 3 // subtract lyrics height + separator/header
+		if viewH < 4 {
+			viewH = 4
+		}
+	}
+
 	var viewContent string
 	switch a.view {
 	case model.ViewHome:
@@ -823,10 +1358,12 @@ func (a App) View() string {
 		viewContent = a.playlist.View(th, centerInnerW, viewH)
 	case model.ViewLyrics:
 		viewContent = a.lyrics.View(th, centerInnerW, viewH, a.playback.Position.Milliseconds())
+	case model.ViewSettings:
+		viewContent = a.settings.View(th, a.config, centerInnerW, viewH)
 	default:
 		viewContent = lipgloss.NewStyle().
 			Foreground(th.FgMuted).Italic(true).
-			Render("  Coming soon...")
+				Render("  Coming soon...")
 	}
 
 	// Status message
@@ -836,12 +1373,8 @@ func (a App) View() string {
 		viewContent += "\n" + statusIcon + statusText
 	}
 
-	// Inline lyrics below content (toggle with 'l' key)
-	if a.showLyrics && a.playback.Track != nil && a.view != model.ViewLyrics {
-		lyricsH := viewH / 2 // use bottom half of remaining space
-		if lyricsH < 4 {
-			lyricsH = 4
-		}
+	// Inline lyrics below content
+	if inlineLyrics {
 		lyricsSep := lipgloss.NewStyle().Foreground(th.Border).Render(
 			"\n" + strings.Repeat("─", centerInnerW) + "\n")
 		lyricsHeader := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(" LYRICS") +
@@ -948,5 +1481,12 @@ func (a App) View() string {
 	// Status bar (full width)
 	statusBar := a.playing.StatusBarView(th, a.playback, a.width)
 
-	return titleLine + "\n" + grid + "\n" + statusBar
+	output := titleLine + "\n" + grid + "\n" + statusBar
+
+	if a.modal.Active {
+		modalBox := a.modal.View(th, a.width, a.height)
+		output = components.Overlay(output, modalBox, a.width, a.height)
+	}
+
+	return output
 }

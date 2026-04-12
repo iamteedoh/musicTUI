@@ -23,7 +23,6 @@ var SidebarItems = []SidebarItem{
 	{ViewLibrary, "♪ ", "Library"},
 	{ViewSearch, "⌕ ", "Search"},
 	{ViewPlaylists, "≡ ", "Playlists"},
-	{ViewVisualizer, "∿ ", "Visualizer"},
 	{ViewLyrics, "¶ ", "Lyrics"},
 	{ViewSettings, "✦ ", "Settings"},
 }

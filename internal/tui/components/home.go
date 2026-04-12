@@ -9,6 +9,7 @@ import (
 
 type Home struct {
 	Username string
+	AuthURL  string // shown when waiting for browser auth
 }
 
 func NewHome() Home {
@@ -28,6 +29,14 @@ func (h Home) View(th theme.Theme, width, height int) string {
 			accent.Bold(true).Render("Welcome, "+h.Username),
 			lipgloss.NewStyle().Foreground(th.Success).Render("● Connected to Spotify"),
 			lipgloss.NewStyle().Foreground(th.Accent).Render("● Authenticated as "+h.Username),
+		)
+	} else if h.AuthURL != "" {
+		lines = append(lines,
+			accent.Bold(true).Render("musicTUI"),
+			lipgloss.NewStyle().Foreground(th.Warning).Render("○ Waiting for login in browser..."),
+			"",
+			muted.Render("If the browser didn't open, visit:"),
+			dim.Render(h.AuthURL),
 		)
 	} else {
 		lines = append(lines,

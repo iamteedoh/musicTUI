@@ -75,6 +75,7 @@ func (p *Playlists) Select() (playlistID string, ok bool) {
 		p.Tracks = nil
 		p.TrackSelected = 0
 		p.TracksLoading = true
+		p.Error = ""
 		return pl.ID, true
 	}
 	return "", false
@@ -176,6 +177,10 @@ func (p Playlists) viewList(th theme.Theme, width, height int) string {
 		b.WriteString("\n " + lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(pos))
 	}
 
+	// ── Key hints ──
+	hint := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
+	b.WriteString("\n " + hint.Render("c:create  e:edit  d:delete"))
+
 	return b.String()
 }
 
@@ -192,6 +197,11 @@ func (p Playlists) viewTracks(th theme.Theme, width, height int) string {
 	// ── Divider ──
 	b.WriteString(" " + lipgloss.NewStyle().Foreground(th.Border).Render(strings.Repeat("─", width-2)) + "\n")
 
+	if p.Error != "" {
+		errStyle := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
+		b.WriteString(" " + errStyle.Render("Error: "+p.Error))
+		return b.String()
+	}
 	if p.TracksLoading && len(p.Tracks) == 0 {
 		spinner := lipgloss.NewStyle().Foreground(th.Accent).Render("◌ ")
 		b.WriteString(" " + spinner + lipgloss.NewStyle().Foreground(th.FgDim).Italic(true).Render("Loading tracks..."))
@@ -268,6 +278,10 @@ func (p Playlists) viewTracks(th theme.Theme, width, height int) string {
 		pos := fmt.Sprintf("%d / %d", p.TrackSelected+1, len(p.Tracks))
 		b.WriteString("\n " + lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(pos))
 	}
+
+	// ── Key hints ──
+	hintStyle := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
+	b.WriteString("\n " + hintStyle.Render("d:remove  m:move to playlist"))
 
 	return b.String()
 }
