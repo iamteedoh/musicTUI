@@ -47,6 +47,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - [Keyboard Shortcuts Reference](#keyboard-shortcuts-reference)
 - [Troubleshooting](#troubleshooting)
 - [Building from Source](#building-from-source-detailed)
+- [Roadmap](#roadmap)
 - [License](#license)
 
 ---
@@ -569,6 +570,15 @@ make build-linux     # Linux (amd64)
 make build-macos     # macOS (ARM + Intel)
 make build-windows   # Windows (amd64)
 ```
+
+---
+
+## Roadmap
+
+Planned features for future releases:
+
+- **YouTube Music Support — Under Investigation**
+- **Local Music Playback Support**
 
 ---
 
