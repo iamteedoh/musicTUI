@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // bridgeCommand is sent to the Rust player-bridge via stdin.
@@ -55,9 +57,23 @@ type Engine struct {
 	started    bool
 	mu         sync.Mutex
 
+	// Debug log — captures all stderr lines (JSON events + librespot logs).
+	// Helps diagnose platform-specific audio/auth issues that would
+	// otherwise be invisible behind the alt-screen TUI.
+	logFile *os.File
+
 	// Spectrum analysis
 	Spectrum *SharedSpectrum
 	analyzer *Analyzer
+}
+
+// LogPath returns the path where bridge stderr is captured.
+func LogPath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "musicTUI", "bridge.log")
 }
 
 // NewEngine creates a new audio engine. The bridge subprocess is NOT started
@@ -78,6 +94,21 @@ func NewEngine(bridgePath, token string) *Engine {
 func (e *Engine) ensureBridge() error {
 	if e.started {
 		return nil
+	}
+
+	// Open (or re-open) the bridge debug log. Append-mode so we keep
+	// history across restarts within a single TUI session; truncated
+	// on the first open below.
+	if e.logFile == nil {
+		path := LogPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+			// Truncate on first open so each run starts with a clean slate.
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+			if err == nil {
+				fmt.Fprintf(f, "=== musicTUI bridge log — %s ===\n", time.Now().Format(time.RFC3339))
+				e.logFile = f
+			}
+		}
 	}
 
 	e.cmd = exec.Command(e.bridgePath)
@@ -115,11 +146,20 @@ func (e *Engine) ensureBridge() error {
 
 func (e *Engine) readEvents(r io.Reader) {
 	scanner := bufio.NewScanner(r)
+	// Bump the buffer size — librespot can occasionally emit very long log
+	// lines (e.g. stack traces) that exceed the default 64KB cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+		// Mirror every line to the debug log so we can diagnose later even
+		// if the bridge crashes or emits non-JSON output. Done before the
+		// JSON parse so librespot's own logs are preserved.
+		if e.logFile != nil {
+			fmt.Fprintln(e.logFile, line)
+		}
 		var ev bridgeEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue // skip non-JSON lines (librespot logs)
+			continue // skip non-JSON lines (librespot logs — captured in log file above)
 		}
 
 		posMs := int64(0)
@@ -285,6 +325,10 @@ func (e *Engine) Close() {
 		_ = e.cmd.Process.Kill()
 		_ = e.cmd.Wait()
 		e.cmd = nil
+	}
+	if e.logFile != nil {
+		_ = e.logFile.Close()
+		e.logFile = nil
 	}
 	e.started = false
 }

@@ -624,8 +624,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "stopped":
 			a.playback.IsPlaying = false
+			// If the bridge exited before we ever reached "playing" it likely
+			// crashed (librespot auth error, audio device failure, etc.).
+			// Point the user at the log so they can see what went wrong.
+			if strings.HasPrefix(a.status, "Loading track") {
+				a.status = "Playback stopped before starting — see " + audio.LogPath()
+			}
 		case "error":
-			a.status = "Playback error: " + msg.Event.Error
+			a.status = "Playback error: " + msg.Event.Error + "  (see " + audio.LogPath() + ")"
 		case "loading":
 			a.status = "Loading track..."
 		}

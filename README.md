@@ -522,8 +522,18 @@ Your saved login has expired. Press **Ctrl+L** to log in again. The old credenti
 ### Playlists show 0 tracks / "Forbidden" error
 Your Spotify Developer App needs your account added under **User Management**. See [Step 2 of Setting Up Spotify](#step-2-add-your-account-to-the-app).
 
-### No sound
-The audio engine is embedded in the binary and extracted automatically on first run. If you still have no sound, ensure you have a working audio output device and that Spotify Premium is active on your account.
+### No sound / track stays paused at 0:00
+The audio engine is embedded in the binary and extracted automatically on first run. If playback doesn't start, check the bridge log:
+
+- **Linux / Mac**: `~/.cache/musicTUI/bridge.log`
+- **Windows**: `%LOCALAPPDATA%\musicTUI\bridge.log`
+
+The log captures everything the audio bridge writes to stderr — librespot auth errors, audio device failures, and so on. Share the last ~30 lines if you report an issue.
+
+Common causes:
+- **No Spotify Premium** — third-party clients cannot stream audio on Free accounts. This is a Spotify restriction, not a musicTUI bug.
+- **No working audio output device** — librespot will fail to initialize if no default output device is available.
+- **Permissions (macOS)** — on first launch, macOS may need to grant the binary permission to access audio output.
 
 ### Media keys don't work
 Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app keyboard shortcuts.
