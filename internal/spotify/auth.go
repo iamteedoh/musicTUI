@@ -16,7 +16,7 @@ import (
 	spotifyauth "github.com/zmb3/spotify/v2/auth"
 	"golang.org/x/oauth2"
 
-	"github.com/iamteedoh/musictui-go/internal/config"
+	"github.com/iamteedoh/musicTUI/internal/config"
 )
 
 const (

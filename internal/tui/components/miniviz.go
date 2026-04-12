@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/iamteedoh/musictui-go/internal/audio"
-	"github.com/iamteedoh/musictui-go/internal/theme"
+	"github.com/iamteedoh/musicTUI/internal/audio"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 )
 
 type MiniVisualizer struct {

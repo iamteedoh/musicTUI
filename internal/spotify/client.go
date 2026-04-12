@@ -13,7 +13,7 @@ import (
 
 	spotifylib "github.com/zmb3/spotify/v2"
 
-	"github.com/iamteedoh/musictui-go/internal/model"
+	"github.com/iamteedoh/musicTUI/internal/model"
 )
 
 const (

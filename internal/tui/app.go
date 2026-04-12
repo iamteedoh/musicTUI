@@ -13,13 +13,13 @@ import (
 	spotifylib "github.com/zmb3/spotify/v2"
 	"golang.org/x/oauth2"
 
-	"github.com/iamteedoh/musictui-go/internal/audio"
-	"github.com/iamteedoh/musictui-go/internal/config"
-	"github.com/iamteedoh/musictui-go/internal/model"
-	"github.com/iamteedoh/musictui-go/internal/mpris"
-	sp "github.com/iamteedoh/musictui-go/internal/spotify"
-	"github.com/iamteedoh/musictui-go/internal/theme"
-	"github.com/iamteedoh/musictui-go/internal/tui/components"
+	"github.com/iamteedoh/musicTUI/internal/audio"
+	"github.com/iamteedoh/musicTUI/internal/config"
+	"github.com/iamteedoh/musicTUI/internal/model"
+	"github.com/iamteedoh/musicTUI/internal/mpris"
+	sp "github.com/iamteedoh/musicTUI/internal/spotify"
+	"github.com/iamteedoh/musicTUI/internal/theme"
+	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
 type App struct {

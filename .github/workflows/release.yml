@@ -16,25 +16,25 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
-            artifact: musictui-linux-amd64
+            artifact: musicTUI-linux-amd64
             bridge_bin: player-bridge
             audio_deps: libasound2-dev
           - os: macos-latest
             goos: darwin
             goarch: arm64
-            artifact: musictui-darwin-arm64
+            artifact: musicTUI-darwin-arm64
             bridge_bin: player-bridge
             audio_deps: ""
           - os: macos-latest
             goos: darwin
             goarch: amd64
-            artifact: musictui-darwin-amd64
+            artifact: musicTUI-darwin-amd64
             bridge_bin: player-bridge
             audio_deps: ""
           - os: windows-latest
             goos: windows
             goarch: amd64
-            artifact: musictui-windows-amd64
+            artifact: musicTUI-windows-amd64
             bridge_bin: player-bridge.exe
             audio_deps: ""
 
@@ -63,7 +63,13 @@ jobs:
         working-directory: bridge
         run: cargo build --bin player-bridge --release
 
-      - name: Build musictui (Go)
+      - name: Embed bridge into Go binary
+        shell: bash
+        run: |
+          mkdir -p bridge-bin
+          cp bridge/target/release/${{ matrix.bridge_bin }} bridge-bin/
+
+      - name: Build musicTUI (Go with embedded bridge)
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -72,15 +78,14 @@ jobs:
         run: |
           EXT=""
           if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          go build -ldflags "-s -w" -o musictui${EXT} .
+          go build -ldflags "-s -w" -o musicTUI${EXT} .
 
       - name: Package (Unix)
         if: matrix.goos != 'windows'
         run: |
           mkdir -p pkg
-          cp musictui pkg/
-          cp bridge/target/release/${{ matrix.bridge_bin }} pkg/
-          chmod +x pkg/musictui pkg/${{ matrix.bridge_bin }}
+          cp musicTUI pkg/
+          chmod +x pkg/musicTUI
           cd pkg && tar czf ../${{ matrix.artifact }}.tar.gz *
 
       - name: Package (Windows)
@@ -88,8 +93,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p pkg
-          cp musictui.exe pkg/
-          cp bridge/target/release/${{ matrix.bridge_bin }} pkg/
+          cp musicTUI.exe pkg/
           cd pkg && 7z a ../${{ matrix.artifact }}.zip *
 
       - name: Upload artifact
@@ -112,7 +116,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            musictui-linux-amd64.tar.gz
-            musictui-darwin-arm64.tar.gz
-            musictui-darwin-amd64.tar.gz
-            musictui-windows-amd64.zip
+            musicTUI-linux-amd64.tar.gz
+            musicTUI-darwin-arm64.tar.gz
+            musicTUI-darwin-amd64.tar.gz
+            musicTUI-windows-amd64.zip

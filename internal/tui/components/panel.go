@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/iamteedoh/musictui-go/internal/theme"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 )
 
 // TitledPanelWithBg renders a titled panel with a custom background color.

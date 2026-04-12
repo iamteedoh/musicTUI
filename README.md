@@ -67,37 +67,33 @@ That's it. No programming experience needed.
 
 This is the easiest way. You download the app and run it — no compiling, no setup tools.
 
-1. Go to the [Releases page](https://github.com/iamteedoh/musictui-go/releases/latest).
+1. Go to the [Releases page](https://github.com/iamteedoh/musicTUI/releases/latest).
 2. Download the file for your system:
-   - **Linux**: `musictui-linux-amd64.tar.gz`
-   - **Mac (Apple Silicon / M1-M4)**: `musictui-darwin-arm64.tar.gz`
-   - **Mac (Intel)**: `musictui-darwin-amd64.tar.gz`
-   - **Windows**: `musictui-windows-amd64.zip`
+   - **Linux**: `musicTUI-linux-amd64.tar.gz`
+   - **Mac (Apple Silicon / M1-M4)**: `musicTUI-darwin-arm64.tar.gz`
+   - **Mac (Intel)**: `musicTUI-darwin-amd64.tar.gz`
+   - **Windows**: `musicTUI-windows-amd64.zip`
 
 3. Extract the downloaded file:
 
    **Linux / Mac** — open a terminal and run:
    ```
-   tar xzf musictui-*.tar.gz
+   tar xzf musicTUI-*.tar.gz
    ```
 
    **Windows** — right-click the `.zip` file and select "Extract All."
 
-4. You will see two files inside:
-   - `musictui` (or `musictui.exe` on Windows) — the main app
-   - `player-bridge` (or `player-bridge.exe` on Windows) — the audio engine
+4. You will have a single file: `musicTUI` (or `musicTUI.exe` on Windows). The audio engine is embedded inside — no extra files needed.
 
-5. **Keep both files in the same folder.** The app needs the audio engine next to it to play music.
-
-6. (Optional) Move both files to a folder in your system PATH so you can run `musictui` from anywhere:
+5. (Optional) Move it to a folder in your system PATH so you can run `musicTUI` from anywhere:
 
    **Linux / Mac**:
    ```
    mkdir -p ~/.local/bin
-   mv musictui player-bridge ~/.local/bin/
+   mv musicTUI ~/.local/bin/
    ```
 
-   **Windows**: Move both files to a folder like `C:\Users\YourName\bin\` and add that folder to your PATH in System Settings.
+   **Windows**: Move the file to a folder like `C:\Users\YourName\bin\` and add that folder to your PATH in System Settings.
 
 ### Build from Source
 
@@ -530,8 +526,8 @@ Your saved login has expired. Press **Ctrl+L** to log in again. The old credenti
 ### Playlists show 0 tracks / "Forbidden" error
 Your Spotify Developer App needs your account added under **User Management**. See [Step 2 of Setting Up Spotify](#step-2-add-your-account-to-the-app).
 
-### No sound / "player-bridge not found"
-The `player-bridge` file must be in the same folder as the `musictui` file (or somewhere in your system PATH). Make sure you extracted both files from the download.
+### No sound
+The audio engine is embedded in the binary and extracted automatically on first run. If you still have no sound, ensure you have a working audio output device and that Spotify Premium is active on your account.
 
 ### Media keys don't work
 Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app keyboard shortcuts.
@@ -554,15 +550,14 @@ Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app k
 
 ```bash
 # Clone the repository
-git clone https://github.com/iamteedoh/musictui-go.git
-cd musictui-go
+git clone https://github.com/iamteedoh/musicTUI.git
+cd musicTUI
 
 # Build both the app and the audio engine
 make build
 
-# The binaries are in the dist/ folder:
-#   dist/musictui        — the main app
-#   dist/player-bridge   — the audio engine
+# Single binary with embedded audio engine:
+#   dist/musicTUI
 
 # (Optional) Install to ~/.local/bin/
 make install

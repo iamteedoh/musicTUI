@@ -5,11 +5,11 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/iamteedoh/musictui-go/internal/audio"
-	"github.com/iamteedoh/musictui-go/internal/lyrics"
-	"github.com/iamteedoh/musictui-go/internal/model"
-	sp "github.com/iamteedoh/musictui-go/internal/spotify"
-	"github.com/iamteedoh/musictui-go/internal/tui/components"
+	"github.com/iamteedoh/musicTUI/internal/audio"
+	"github.com/iamteedoh/musicTUI/internal/lyrics"
+	"github.com/iamteedoh/musicTUI/internal/model"
+	sp "github.com/iamteedoh/musicTUI/internal/spotify"
+	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
 // Navigation

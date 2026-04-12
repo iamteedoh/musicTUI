@@ -46,7 +46,7 @@ func Fetch(trackName, artistName string, durationSec int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "musicTUI/1.0 (https://github.com/iamteedoh/musictui-go)")
+	req.Header.Set("User-Agent", "musicTUI/1.0 (https://github.com/iamteedoh/musicTUI)")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

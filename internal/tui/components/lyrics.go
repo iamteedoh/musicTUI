@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/iamteedoh/musictui-go/internal/lyrics"
-	"github.com/iamteedoh/musictui-go/internal/theme"
+	"github.com/iamteedoh/musicTUI/internal/lyrics"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 )
 
 type Lyrics struct {
