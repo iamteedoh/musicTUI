@@ -70,6 +70,15 @@ fn emit(ev: EventOut) {
 
 #[tokio::main]
 async fn main() {
+    // Initialize env_logger so librespot's log:: macros actually emit to
+    // stderr. Without this, every librespot error/warning was silently
+    // swallowed, leaving us with an empty bridge.log and nothing to
+    // diagnose from. Default to warn so we don't spam users; callers
+    // can override with RUST_LOG.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .target(env_logger::Target::Stderr)
+        .init();
+
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
     // Read commands from stdin in a blocking thread
@@ -102,9 +111,7 @@ async fn main() {
             _ = spectrum_interval.tick() => {
                 if let Some(ref spec) = spectrum {
                     if let Ok(data) = spec.read() {
-                        // Send all available magnitudes — let Go handle the mapping
                         let mags: Vec<f32> = data.magnitudes.clone();
-
                         emit(EventOut {
                             event: "spectrum".into(),
                             magnitudes: Some(mags),
