@@ -303,6 +303,27 @@ func (e *Engine) Volume() int {
 	return int(e.volume.Load())
 }
 
+// SetToken updates the OAuth access token used by the bridge for streaming
+// authentication. Called on AuthSuccessMsg so a re-login picks up fresh
+// scopes without the TUI needing to tear down and recreate the engine.
+// Also kills the current bridge subprocess so the next play command
+// spawns a new one that performs a fresh session.connect() with the new
+// token — librespot does not support re-authentication on an existing
+// session.
+func (e *Engine) SetToken(token string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.token = token
+	if e.cmd != nil && e.cmd.Process != nil {
+		_ = e.cmd.Process.Kill()
+	}
+	if e.stdin != nil {
+		_ = e.stdin.Close()
+		e.stdin = nil
+	}
+	// readEvents goroutine will observe stderr EOF and reset e.started.
+}
+
 func (e *Engine) PositionMs() int64 {
 	return e.positionMs.Load()
 }

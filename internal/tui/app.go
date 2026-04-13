@@ -281,10 +281,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.accessToken = msg.AccessToken
 		a.status = "" // Auth info shown in home view and title bar
 
-		// Create audio engine (lazy — bridge subprocess starts on first play)
-		if a.bridgePath != "" && a.engine == nil {
-			a.engine = audio.NewEngine(a.bridgePath, msg.AccessToken)
-			a.viz.SetSpectrum(a.engine.Spectrum)
+		// Create audio engine (lazy — bridge subprocess starts on first play).
+		// On re-auth, keep the existing engine but push the refreshed token
+		// so the next play uses tokens with the current scope set.
+		if a.bridgePath != "" {
+			if a.engine == nil {
+				a.engine = audio.NewEngine(a.bridgePath, msg.AccessToken)
+				a.viz.SetSpectrum(a.engine.Spectrum)
+			} else {
+				a.engine.SetToken(msg.AccessToken)
+			}
 		}
 
 		// Auto-load playlists for the left panel
