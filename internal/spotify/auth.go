@@ -24,6 +24,11 @@ const (
 	callbackPort = "8888"
 )
 
+// requiredScopes matches the scope list librespot_oauth requests. Passing a
+// strict subset of these to librespot's streaming service has been observed
+// to produce "Bad credentials" errors on fresh installs; the extra scopes
+// are harmless for the Web API but appear to be load-bearing for the
+// streaming service's OAuth acceptance.
 var requiredScopes = []string{
 	spotifyauth.ScopeUserReadPrivate,
 	spotifyauth.ScopeUserReadEmail,
@@ -37,6 +42,13 @@ var requiredScopes = []string{
 	spotifyauth.ScopeUserReadPlaybackState,
 	spotifyauth.ScopeUserModifyPlaybackState,
 	spotifyauth.ScopeUserReadRecentlyPlayed,
+	// Extra scopes required by librespot for the streaming service:
+	"app-remote-control",
+	"user-read-currently-playing",
+	"user-read-playback-position",
+	"user-top-read",
+	"user-follow-read",
+	"user-follow-modify",
 }
 
 // Auth manages Spotify OAuth PKCE flow and token caching.

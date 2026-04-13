@@ -631,7 +631,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.status = "Playback stopped before starting — see " + audio.LogPath()
 			}
 		case "error":
-			a.status = "Playback error: " + msg.Event.Error + "  (see " + audio.LogPath() + ")"
+			// "Bad credentials" from librespot means the cached OAuth token
+			// no longer satisfies the streaming service (commonly because the
+			// scopes it was issued with are now insufficient). Purge the
+			// token so the user can re-authenticate with a fresh set.
+			errMsg := msg.Event.Error
+			if strings.Contains(errMsg, "Bad credentials") {
+				sp.ClearToken()
+				a.client = nil
+				a.home.Username = ""
+				a.status = "Session needs refreshing — press Ctrl+L to re-authenticate"
+				return a, nil
+			}
+			a.status = "Playback error: " + errMsg + "  (see " + audio.LogPath() + ")"
 		case "loading":
 			a.status = "Loading track..."
 		}

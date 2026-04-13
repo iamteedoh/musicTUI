@@ -114,6 +114,13 @@ func (e *Engine) ensureBridge() error {
 	e.cmd = exec.Command(e.bridgePath)
 	setSysProcAttr(e.cmd)
 
+	// Ask librespot for info-level logs so the bridge.log file has enough
+	// detail to diagnose auth/device failures. Callers can override by
+	// exporting RUST_LOG before launching musicTUI.
+	if os.Getenv("RUST_LOG") == "" {
+		e.cmd.Env = append(os.Environ(), "RUST_LOG=librespot=info,info")
+	}
+
 	var err error
 	e.stdin, err = e.cmd.StdinPipe()
 	if err != nil {
