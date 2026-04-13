@@ -67,6 +67,13 @@ type App struct {
 	latestRelease   *update.Release
 	updateAvailable bool
 	updating        bool
+
+	// Stale-session recovery: when librespot reports a track as Unavailable
+	// (typically post-sleep-wake or after long idle), we hold the failed
+	// track here while we refresh the OAuth token. Once AuthSuccessMsg
+	// lands with a fresh token (and the engine has been re-seeded), we
+	// re-dispatch PlayTrack for this track once.
+	pendingRetryTrack *model.Track
 }
 
 func NewApp(cfg config.Config, bridgePath string, version string) App {
@@ -293,9 +300,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// If a track failed with Unavailable and we kicked off a token
+		// refresh, retry the track now that the engine has the fresh
+		// token. Fire-and-forget: if this retry also fails, the normal
+		// error path takes over (pendingRetryTrack stays nil this time).
+		if a.pendingRetryTrack != nil {
+			retry := *a.pendingRetryTrack
+			a.pendingRetryTrack = nil
+			a.status = "Retrying playback..."
+			return a, tea.Batch(
+				FetchPlaylistsCmd(msg.Client, 0),
+				func() tea.Msg { return PlayTrackMsg{Track: retry} },
+			)
+		}
 		// Auto-load playlists for the left panel
 		return a, FetchPlaylistsCmd(msg.Client, 0)
 	case AuthErrorMsg:
+		// Stale-session retry failed — clear the pending track so we
+		// don't loop, and surface a clean status message.
+		a.pendingRetryTrack = nil
 		a.status = "Auth error: " + msg.Err.Error()
 		return a, nil
 
@@ -548,6 +571,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case StatusMsg:
 		a.status = string(msg)
+		// If a stale-session retry was pending but auth came back as a
+		// plain status (no AuthSuccessMsg), drop the retry so we don't
+		// hang waiting for a success that'll never arrive.
+		a.pendingRetryTrack = nil
 		return a, nil
 
 	// Playback
@@ -648,6 +675,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.home.Username = ""
 				a.status = "Session needs refreshing — press Ctrl+L to re-authenticate"
 				return a, nil
+			}
+			// "Unavailable: spotify:track:..." typically means the librespot
+			// session is stale (post-sleep, long idle). We transparently
+			// refresh the OAuth token and retry the track once so the user
+			// doesn't have to quit and relaunch.
+			if strings.HasPrefix(errMsg, "Unavailable") && a.pendingRetryTrack == nil && a.playback.Track != nil && a.config.Spotify.ClientID != "" {
+				retry := *a.playback.Track
+				a.pendingRetryTrack = &retry
+				a.status = "Session expired — refreshing and retrying..."
+				return a, a.tryCachedAuthCmd()
 			}
 			a.status = "Playback error: " + errMsg + "  (see " + audio.LogPath() + ")"
 		case "loading":

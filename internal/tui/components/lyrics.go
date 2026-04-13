@@ -85,39 +85,70 @@ func (l Lyrics) viewSynced(th theme.Theme, width, height int, positionMs int64) 
 		}
 	}
 
-	// Auto-scroll: center current line vertically
-	startIdx := currentIdx - height/2
-	if startIdx < 0 {
-		startIdx = 0
-	}
+	// Styles. Width(width) makes lipgloss wrap long lines on word boundaries
+	// rather than truncating with an ellipsis; Padding keeps text off the
+	// panel edges. The active style uses an accent background that paints
+	// across every wrapped visual row, so the highlight doesn't break.
+	activeStyle := lipgloss.NewStyle().
+		Foreground(th.Surface).
+		Background(th.Accent).
+		Bold(true).
+		Width(width).
+		Padding(0, 1)
+	nearStyle := lipgloss.NewStyle().
+		Foreground(th.Fg).
+		Width(width).
+		Padding(0, 1)
+	farStyle := lipgloss.NewStyle().
+		Foreground(th.FgMuted).
+		Width(width).
+		Padding(0, 1)
 
-	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	dim := lipgloss.NewStyle().Foreground(th.FgDim)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted)
-
-	var lines []string
-	for i := startIdx; i < len(l.Lines) && len(lines) < height; i++ {
+	renderLine := func(i int) string {
 		text := l.Lines[i].Text
 		if text == "" {
 			text = "♫"
 		}
-		if len(text) > width-4 {
-			text = text[:width-5] + "…"
-		}
-
-		if i == currentIdx {
-			// Current line: bright, centered with indicator
-			lines = append(lines, " ▸ "+accent.Render(text))
-		} else if i == currentIdx-1 || i == currentIdx+1 {
-			// Adjacent lines: dimmer
-			lines = append(lines, "   "+dim.Render(text))
-		} else {
-			// Far lines: muted
-			lines = append(lines, "   "+muted.Render(text))
+		switch {
+		case i == currentIdx:
+			return activeStyle.Render("▸ " + text)
+		case i == currentIdx-1 || i == currentIdx+1:
+			return nearStyle.Render("  " + text)
+		default:
+			return farStyle.Render("  " + text)
 		}
 	}
 
-	return strings.Join(lines, "\n")
+	// Pre-render each logical line so we know its visual height (wrapped
+	// lines can occupy 2+ rows). The scroll logic below needs that to
+	// pick a startIdx that keeps the active line vertically centered.
+	rendered := make([]string, len(l.Lines))
+	heights := make([]int, len(l.Lines))
+	for i := range l.Lines {
+		rendered[i] = renderLine(i)
+		heights[i] = lipgloss.Height(rendered[i])
+	}
+
+	// Walk backwards from currentIdx until we've accumulated ~height/2
+	// rows of context above the active line.
+	target := height / 2
+	accumulated := 0
+	startIdx := currentIdx
+	for startIdx > 0 && accumulated+heights[startIdx-1] <= target {
+		startIdx--
+		accumulated += heights[startIdx]
+	}
+
+	// Emit lines until we run out of vertical space. Track visual rows
+	// rather than logical lines so wrapped content doesn't overflow.
+	var out []string
+	total := 0
+	for i := startIdx; i < len(l.Lines) && total < height; i++ {
+		out = append(out, rendered[i])
+		total += heights[i]
+	}
+
+	return strings.Join(out, "\n")
 }
 
 func (l Lyrics) viewPlain(th theme.Theme, width, height int) string {
@@ -131,16 +162,19 @@ func (l Lyrics) viewPlain(th theme.Theme, width, height int) string {
 		startIdx = 0
 	}
 
-	dim := lipgloss.NewStyle().Foreground(th.FgDim)
+	dimStyle := lipgloss.NewStyle().
+		Foreground(th.FgDim).
+		Width(width).
+		Padding(0, 1)
 
-	var lines []string
-	for i := startIdx; i < len(plainLines) && len(lines) < height; i++ {
+	var out []string
+	total := 0
+	for i := startIdx; i < len(plainLines) && total < height; i++ {
 		text := plainLines[i]
-		if len(text) > width-4 {
-			text = text[:width-5] + "…"
-		}
-		lines = append(lines, "  "+dim.Render(text))
+		rendered := dimStyle.Render(" " + text)
+		out = append(out, rendered)
+		total += lipgloss.Height(rendered)
 	}
 
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
