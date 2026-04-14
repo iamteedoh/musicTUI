@@ -10,6 +10,7 @@ const (
 	ViewVisualizer
 	ViewLyrics
 	ViewSettings
+	ViewHelp
 )
 
 type SidebarItem struct {

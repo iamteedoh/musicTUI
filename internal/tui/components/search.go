@@ -284,8 +284,7 @@ func (s Search) View(th theme.Theme, width, height int) string {
 	// Show breadcrumb/title when in a drill-down (e.g. "Tracks from Album Name")
 	if s.StatusTitle != "" && len(s.history) > 0 {
 		breadcrumb := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(" ← " + s.StatusTitle)
-		hint := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("  (Esc to go back)")
-		sections = append(sections, breadcrumb+hint)
+		sections = append(sections, breadcrumb)
 	}
 
 	// ── Result cards ──
@@ -326,6 +325,25 @@ func (s Search) View(th theme.Theme, width, height int) string {
 
 	if len(s.Results.Playlists) > 0 {
 		sections = append(sections, renderPlaylistCard(th, s.Results.Playlists, &itemIdx, s.SelectedResult, cardWidth))
+	}
+
+	// ── Inline key hints. Two hint sets: one when focused on the input
+	// (Tab to reach results), another when the results list is focused.
+	if s.ResultsFocused {
+		hints := []Hint{
+			{"j/k · ↑↓", "move"},
+			{"Enter", "play / drill in"},
+			{"a", "add to playlist"},
+			{"Tab", "back to input"},
+			{"Esc", "back"},
+		}
+		sections = append(sections, " "+RenderHints(th, hints))
+	} else {
+		sections = append(sections, " "+RenderHints(th, []Hint{
+			{"Type", "query"},
+			{"Enter", "search"},
+			{"Tab", "focus results"},
+		}))
 	}
 
 	return strings.Join(sections, "\n")

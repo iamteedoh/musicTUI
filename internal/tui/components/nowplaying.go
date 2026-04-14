@@ -21,19 +21,16 @@ func fmtDuration(ms int) string {
 }
 
 // StatusBarView renders a single-line status bar at the bottom of the screen.
-// Left side: keybinding hints. Right side: playback info + progress + volume.
+// Left side: static keybinding legend covering all core actions. Right
+// side: playback info + progress + volume. Left side gracefully shortens
+// to a compact variant on narrow terminals so it never pushes the
+// right side off-screen.
 func (n NowPlaying) StatusBarView(th theme.Theme, pb model.PlaybackState, width int) string {
 	dim := lipgloss.NewStyle().Foreground(th.FgMuted)
-	accent := lipgloss.NewStyle().Foreground(th.Accent)
 	bright := lipgloss.NewStyle().Foreground(th.Fg)
 
-	// ── Left: keybinding hints ──
-	hints := dim.Render("[") + accent.Render("Play: SPACE") + dim.Render("] [") +
-		accent.Render("Next: n") + dim.Render("] [") +
-		accent.Render("Vol: +/-") + dim.Render("] [") +
-		accent.Render("Search: /") + dim.Render("]")
-
-	// ── Right: now-playing info ──
+	// ── Right: now-playing info ── (compute first so we know how much
+	// space is left for the legend on the left)
 	var right string
 	if pb.Track != nil {
 		trackInfo := bright.Bold(true).Render("♫ " + truncate(pb.Track.Name, 25))
@@ -69,9 +66,51 @@ func (n NowPlaying) StatusBarView(th theme.Theme, pb model.PlaybackState, width 
 		right = dim.Italic(true).Render("No track playing")
 	}
 
+	// ── Left: comprehensive static legend ──
+	// Tiers of progressively-shorter hint sets so we degrade gracefully
+	// rather than truncating mid-word when the terminal is narrow.
+	full := []Hint{
+		{"Space", "⏯"},
+		{"n/p", "⏭/⏮"},
+		{"+/-", "vol"},
+		{"s", "shuffle"},
+		{"r", "repeat"},
+		{"l", "lyrics"},
+		{"/", "search"},
+		{"?", "help"},
+		{"q", "quit"},
+	}
+	medium := []Hint{
+		{"Space", "⏯"},
+		{"n/p", "⏭/⏮"},
+		{"+/-", "vol"},
+		{"/", "search"},
+		{"?", "help"},
+		{"q", "quit"},
+	}
+	short := []Hint{
+		{"Space", "⏯"},
+		{"n/p", "⏭/⏮"},
+		{"?", "help"},
+	}
+	rightW := lipgloss.Width(right)
+	available := width - rightW - 4 // padding + inter-section gap
+
+	var hints string
+	for _, candidate := range [][]Hint{full, medium, short} {
+		h := RenderHints(th, candidate)
+		if lipgloss.Width(h) <= available {
+			hints = h
+			break
+		}
+	}
+	if hints == "" {
+		// Fallback — terminal is very narrow; show just the marker
+		hints = dim.Render("?: help")
+	}
+
 	// ── Compose status bar ──
 	leftW := lipgloss.Width(hints)
-	rightW := lipgloss.Width(right)
 	gap := width - leftW - rightW - 2
 	if gap < 1 {
 		gap = 1

@@ -24,11 +24,14 @@ const (
 	callbackPort = "8888"
 )
 
-// requiredScopes matches the scope list librespot_oauth requests. Passing a
-// strict subset of these to librespot's streaming service has been observed
-// to produce "Bad credentials" errors on fresh installs; the extra scopes
-// are harmless for the Web API but appear to be load-bearing for the
-// streaming service's OAuth acceptance.
+// requiredScopes is the minimum set we need for the Web API surface the
+// TUI actually uses: library browse, search, playback control, playlist
+// management, and recently-played. The extra librespot-oauth-style
+// scopes we added earlier to chase a "Bad credentials" error turned out
+// to be unnecessary (the real cause was a Cargo release-profile bug on
+// macOS) and have been observed to cause Spotify's /me/playlists
+// endpoint to silently return 0 items on some accounts, so we keep the
+// scope list tight.
 var requiredScopes = []string{
 	spotifyauth.ScopeUserReadPrivate,
 	spotifyauth.ScopeUserReadEmail,
@@ -42,13 +45,6 @@ var requiredScopes = []string{
 	spotifyauth.ScopeUserReadPlaybackState,
 	spotifyauth.ScopeUserModifyPlaybackState,
 	spotifyauth.ScopeUserReadRecentlyPlayed,
-	// Extra scopes required by librespot for the streaming service:
-	"app-remote-control",
-	"user-read-currently-playing",
-	"user-read-playback-position",
-	"user-top-read",
-	"user-follow-read",
-	"user-follow-modify",
 }
 
 // Auth manages Spotify OAuth PKCE flow and token caching.

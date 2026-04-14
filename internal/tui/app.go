@@ -35,6 +35,8 @@ type App struct {
 	sidebarPlaylistFocus bool // true when sidebar focus is on the playlist section
 	modal    components.Modal
 	onboard  components.Onboard
+	help     components.Help
+	prevView model.View // view to return to when ? help is closed
 	sidebar  components.Sidebar
 	home     components.Home
 	library  components.Library
@@ -87,6 +89,7 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		sidebar:  components.NewSidebar(),
 		home:     components.NewHome(),
 		onboard:  components.NewOnboard(),
+		help:     components.NewHelp(),
 		library:  components.NewLibrary(),
 		search:   components.NewSearch(),
 		playlist: components.NewPlaylists(),
@@ -361,7 +364,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		a.playlist.Loading = false
 
-		// Check for duplicate playlist names (if enabled in settings)
+		// Opt-in cleanup prompts. Disabled by default because these
+		// actions unfollow playlists (Spotify's API has no true delete),
+		// and unfollowing a playlist you own removes it from /me/playlists
+		// with no public API to list it back. Explicit warning in the
+		// prompt copy.
 		if a.config.CheckDuplicates {
 			if groups := a.findDuplicatePlaylists(); len(groups) > 0 {
 				var names []string
@@ -372,18 +379,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, n := range names {
 					dupMsg += "  " + n + "\n"
 				}
-				dupMsg += "\nMerge duplicates into one playlist each? (y/n)"
-				a.modal.ShowConfirm("Duplicate Playlists Found", dupMsg, components.ActionConsolidateDuplicates, "")
+				dupMsg += "\nMerge into one playlist each?\n" +
+					"Extras will be unfollowed (not deleted). If you own them\n" +
+					"you will not be able to list them again via this app."
+				a.modal.ShowConfirm("Merge Duplicate Playlists", dupMsg, components.ActionConsolidateDuplicates, "")
 				return a, nil
 			}
-			// Check for empty playlists
 			if empty := a.findEmptyPlaylists(); len(empty) > 0 {
 				emptyMsg := fmt.Sprintf("%d empty playlist(s) found:\n\n", len(empty))
 				for _, pl := range empty {
 					emptyMsg += fmt.Sprintf("  \"%s\"\n", pl.Name)
 				}
-				emptyMsg += "\nDelete all empty playlists? (y/n)"
-				a.modal.ShowConfirm("Empty Playlists Found", emptyMsg, components.ActionDeleteEmptyPlaylists, "")
+				emptyMsg += "\nRemove them from your library?\n" +
+					"These will be unfollowed (not deleted). If you own them\n" +
+					"you will not be able to list them again via this app."
+				a.modal.ShowConfirm("Remove Empty Playlists", emptyMsg, components.ActionDeleteEmptyPlaylists, "")
 			}
 		}
 		return a, nil
@@ -775,6 +785,17 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
+	case "?":
+		// Don't swallow `?` while the user is typing in the search input.
+		if a.isSearchInputFocused() {
+			break
+		}
+		if a.view != model.ViewHelp {
+			a.prevView = a.view
+			a.view = model.ViewHelp
+			a.help.Reset()
+		}
+		return a, nil
 	}
 
 	// Arrow keys for panel switching (unless typing in search)
@@ -1119,16 +1140,17 @@ func (a App) handleSidebarPlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d", "x":
 		if a.playlist.Selected < len(a.playlist.Items) {
 			pl := a.playlist.Items[a.playlist.Selected]
-			if pl.TrackCount == 0 {
-				// Empty playlist — delete immediately
-				if a.client != nil {
-					return a, DeletePlaylistCmd(a.client, pl.ID)
-				}
-			} else {
-				a.modal.ShowConfirm("Delete Playlist",
-					fmt.Sprintf("Remove \"%s\" (%d tracks) from your library? (y/n)", pl.Name, pl.TrackCount),
-					components.ActionDeletePlaylist, pl.ID)
-			}
+			// Always confirm — an empty playlist that's yours can still
+			// only be "unfollowed" via the Spotify API, and the API has
+			// no way to list it back afterwards. No instant-delete.
+			msg := fmt.Sprintf(
+				"Remove \"%s\" (%d tracks) from your library?\n\n"+
+					"This unfollows the playlist. You'll still own it on Spotify, but it will\n"+
+					"disappear from musicTUI and cannot be restored automatically.",
+				pl.Name, pl.TrackCount,
+			)
+			a.modal.ShowConfirm("Remove from Library", msg,
+				components.ActionDeletePlaylist, pl.ID)
 		}
 	case "c":
 		a.modal.ShowInput("Create Playlist", "Name", "", "Description (optional)", "", components.ActionCreatePlaylist, "")
@@ -1177,6 +1199,26 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.lyrics.ScrollUp()
 		case "esc", "h":
 			a.focus = model.FocusSidebar
+		}
+	case model.ViewHelp:
+		switch msg.String() {
+		case "j", "down":
+			a.help.ScrollDown()
+		case "k", "up":
+			a.help.ScrollUp()
+		case "esc", "h", "?":
+			// Return to whatever view we came from; fall back to Home.
+			target := a.prevView
+			if target == model.ViewHelp {
+				target = model.ViewHome
+			}
+			a.view = target
+			for i, item := range a.sidebar.Items {
+				if item.View == target {
+					a.sidebar.Selected = i
+					break
+				}
+			}
 		}
 	case model.ViewSettings:
 		switch msg.String() {
@@ -1469,7 +1511,17 @@ func (a App) View() string {
 	} else if a.playlist.Loading {
 		plContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" Loading...")
 	} else {
-		plContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" No playlists")
+		// If the user is authenticated but no playlists came back, point
+		// them at the Playlists view where the full User-Management fix
+		// is explained. "No playlists found" alone is misleading when
+		// they actually have playlists on Spotify.
+		if a.client != nil {
+			plContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).
+				Render(" None — see Playlists view")
+		} else {
+			plContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).
+				Render(" No playlists")
+		}
 	}
 
 	leftBc := bc
@@ -1549,16 +1601,29 @@ func (a App) View() string {
 		viewContent = a.lyrics.View(th, centerInnerW, viewH, a.playback.Position.Milliseconds())
 	case model.ViewSettings:
 		viewContent = a.settings.View(th, a.config, centerInnerW, viewH)
+	case model.ViewHelp:
+		viewContent = a.help.View(th, centerInnerW, viewH)
 	default:
 		viewContent = lipgloss.NewStyle().
 			Foreground(th.FgMuted).Italic(true).
 				Render("  Coming soon...")
 	}
 
-	// Status message
+	// Status message — cap width so a very long err.Error() from any
+	// source can't blow out the center column. Full message is still in
+	// the bridge log / stderr for debuggability.
 	if a.status != "" {
 		statusIcon := lipgloss.NewStyle().Foreground(th.Accent).Render("● ")
-		statusText := lipgloss.NewStyle().Foreground(th.FgDim).Render(a.status)
+		maxW := centerInnerW - 4 // account for icon + padding
+		if maxW < 20 {
+			maxW = 20
+		}
+		trimmed := a.status
+		if len([]rune(trimmed)) > maxW {
+			runes := []rune(trimmed)
+			trimmed = string(runes[:maxW-1]) + "…"
+		}
+		statusText := lipgloss.NewStyle().Foreground(th.FgDim).Render(trimmed)
 		viewContent += "\n" + statusIcon + statusText
 	}
 
@@ -1600,12 +1665,17 @@ func (a App) View() string {
 	// Tracklist content — shows the play queue
 	var tlContent string
 	if !a.queue.IsEmpty() {
-		// Scroll window: show tracks around the current index
-		startIdx := 0
-		if a.queue.Index > tlLines/2 {
-			startIdx = a.queue.Index - tlLines/2
+		// Reserve the last row for a key hints line so the user knows
+		// the queue panel is interactive. Render tracks above it.
+		trackLines := tlLines - 1
+		if trackLines < 1 {
+			trackLines = 1
 		}
-		for i := startIdx; i < a.queue.Len() && i < startIdx+tlLines; i++ {
+		startIdx := 0
+		if a.queue.Index > trackLines/2 {
+			startIdx = a.queue.Index - trackLines/2
+		}
+		for i := startIdx; i < a.queue.Len() && i < startIdx+trackLines; i++ {
 			t := a.queue.Tracks[i]
 			prefix := "  "
 			style := lipgloss.NewStyle().Foreground(th.FgDim)
@@ -1623,6 +1693,10 @@ func (a App) View() string {
 			}
 			tlContent += line
 		}
+		tlContent += "\n" + components.RenderHints(th, []components.Hint{
+			{Key: "j/k · ↑↓", Desc: "move"},
+			{Key: "Enter", Desc: "play"},
+		})
 	} else {
 		tlContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" No active queue")
 	}

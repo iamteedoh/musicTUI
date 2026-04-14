@@ -266,10 +266,16 @@ func (m Modal) viewConfirm(th theme.Theme, width int) string {
 	}
 	b.WriteString("\n")
 
-	yKey := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("y")
-	nKey := lipgloss.NewStyle().Foreground(th.FgMuted).Bold(true).Render("n")
-	b.WriteString(yKey + lipgloss.NewStyle().Foreground(th.FgDim).Render(" yes  ") +
-		nKey + lipgloss.NewStyle().Foreground(th.FgDim).Render(" no"))
+	// Match the hint row format used everywhere else in the app.
+	hint := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
+	keyY := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("y")
+	keyN := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("n")
+	keyEsc := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("Esc")
+	b.WriteString(
+		keyY + hint.Render(": yes  ·  ") +
+			keyN + hint.Render(": no  ·  ") +
+			keyEsc + hint.Render(": cancel"),
+	)
 
 	return b.String()
 }

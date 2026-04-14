@@ -191,5 +191,12 @@ func (l Library) View(th theme.Theme, width, height int) string {
 		b.WriteString("\n " + lipgloss.NewStyle().Foreground(th.Accent).Italic(true).Render("Loading more..."))
 	}
 
+	// ── Inline key hints ──
+	b.WriteString("\n " + RenderHints(th, []Hint{
+		{"j/k · ↑↓", "move"},
+		{"Enter", "play"},
+		{"a", "add to playlist"},
+	}))
+
 	return b.String()
 }

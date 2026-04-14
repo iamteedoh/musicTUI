@@ -22,11 +22,16 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Theme:           "nord",
-		TickRateMs:      33,
-		FrameRate:       60,
-		Volume:          75,
-		CheckDuplicates: true,
+		Theme:      "nord",
+		TickRateMs: 33,
+		FrameRate:  60,
+		Volume:     75,
+		// Off by default. The "cleanup" it offers unfollows playlists
+		// (Spotify's only "delete" operation), which for playlists the
+		// user owns results in them disappearing from /me/playlists
+		// without any real way to recover via the public API. Users who
+		// want this can opt-in via Settings.
+		CheckDuplicates: false,
 	}
 }
 

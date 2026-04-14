@@ -149,21 +149,22 @@ func (o Onboard) progressDots(th theme.Theme) string {
 func (o Onboard) footer(th theme.Theme) string {
 	key := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	dim := lipgloss.NewStyle().Foreground(th.FgMuted)
+	sep := dim.Render("  ·  ")
 	var hints []string
 	if o.Step > 0 {
-		hints = append(hints, key.Render("[←]")+dim.Render(" back"))
+		hints = append(hints, key.Render("←")+dim.Render(": back"))
 	}
 	if o.OnFinalStep() {
-		hints = append(hints, key.Render("[Enter]")+dim.Render(" finish"))
+		hints = append(hints, key.Render("Enter")+dim.Render(": finish"))
 	} else {
-		hints = append(hints, key.Render("[→ or Enter]")+dim.Render(" next"))
+		hints = append(hints, key.Render("→ / Enter")+dim.Render(": next"))
 	}
 	if o.Step == 1 {
-		hints = append(hints, key.Render("[O]")+dim.Render(" open in browser"))
+		hints = append(hints, key.Render("O")+dim.Render(": open dashboard"))
 	}
-	hints = append(hints, key.Render("[Esc]")+dim.Render(" skip"))
+	hints = append(hints, key.Render("Esc")+dim.Render(": skip"))
 	return lipgloss.NewStyle().Align(lipgloss.Center).Width(60).
-		Render(strings.Join(hints, "   "))
+		Render(strings.Join(hints, sep))
 }
 
 func (o Onboard) viewWelcome(th theme.Theme) string {
@@ -212,12 +213,28 @@ func (o Onboard) viewCreateApp(th theme.Theme) string {
 func (o Onboard) viewAddUser(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(60)
 	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(54)
+
+	// Boxed warning to visually separate this from the other steps —
+	// this is the #1 onboarding trap and skipping it silently breaks
+	// most features later.
+	warnBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(th.Warning).
+		Padding(0, 1).
+		Width(58).
+		Render(
+			warn.Render("⚠  Important — don't skip this step") + "\n\n" +
+				muted.Render("Without adding your account under User Management, login will succeed but these will all fail silently:") + "\n" +
+				muted.Render("  · browsing tracks inside your playlists") + "\n" +
+				muted.Render("  · adding songs to playlists") + "\n" +
+				muted.Render("  · seeing recent listens or your saved library"),
+		)
+
 	var b strings.Builder
-	b.WriteString(warn.Render("Important — don't skip this step."))
+	b.WriteString(warnBox)
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("On your new app page, click the \"User Management\" tab, then \"Add User\". Enter the email address linked to your Spotify account and save."))
-	b.WriteString("\n\n")
-	b.WriteString(body.Render("Without this, login will succeed but some features (like loading playlist tracks) will fail."))
+	b.WriteString(body.Render("On your new app page in the Spotify dashboard, click the \"User Management\" tab, then \"Add User\". Enter the email address linked to your Spotify account and save."))
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("When done, press → to continue."))
 	return b.String()

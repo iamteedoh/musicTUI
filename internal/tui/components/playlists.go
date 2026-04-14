@@ -97,6 +97,60 @@ func (p *Playlists) SelectedTrack() *model.Track {
 	return nil
 }
 
+// emptyStateHint renders the "no playlists" state. Spotify's /me/playlists
+// endpoint can silently return 0 items even when the user clearly has
+// playlists, almost always because their email isn't (yet) allowlisted
+// in the Spotify Developer App's User Management screen. We surface a
+// short troubleshooting recipe so the user doesn't have to go hunting
+// through docs.
+//
+// We deliberately avoid nested Width-styled renders (they fight the
+// outer Center alignment and produce a broken-looking border). Content
+// is a single multi-line string; the enclosing box sets Width once.
+func (p Playlists) emptyStateHint(th theme.Theme, width, height int) string {
+	boxW := 64
+	if boxW > width-4 {
+		boxW = width - 4
+	}
+
+	title := lipgloss.NewStyle().Foreground(th.Warning).Bold(true).
+		Render("No playlists returned")
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+	step := lipgloss.NewStyle().Foreground(th.FgDim)
+	body := lipgloss.NewStyle().Foreground(th.Fg)
+
+	lines := []string{
+		title,
+		"",
+		body.Render("If you have playlists on Spotify but see none here,"),
+		body.Render("your Spotify Developer App's User Management most"),
+		body.Render("likely needs a nudge:"),
+		"",
+		step.Render("  1. Open ") + accent.Render("developer.spotify.com/dashboard"),
+		step.Render("  2. Your musicTUI app → User Management"),
+		step.Render("  3. Remove your email, then re-add it"),
+		step.Render("  4. Back here, press ") + accent.Render("Ctrl+L") + step.Render(" to re-auth"),
+		"",
+		body.Render("Saved songs and recent plays may still load —"),
+		body.Render("those endpoints are less strict about the sync."),
+		"",
+		muted.Render("If you genuinely have no playlists yet, ignore this."),
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(th.Warning).
+		Padding(1, 2).
+		Width(boxW).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.NewStyle().
+		Width(width).Height(height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(box)
+}
+
 func (p Playlists) View(th theme.Theme, width, height int) string {
 	if p.Mode == PlaylistModeTracks {
 		return p.viewTracks(th, width, height)
@@ -110,11 +164,7 @@ func (p Playlists) viewList(th theme.Theme, width, height int) string {
 		return " " + spinner + lipgloss.NewStyle().Foreground(th.FgDim).Italic(true).Render("Loading playlists...")
 	}
 	if len(p.Items) == 0 {
-		empty := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("󰲸 No playlists found")
-		return lipgloss.NewStyle().
-			Width(width).Height(height).
-			Align(lipgloss.Center, lipgloss.Center).
-			Render(empty)
+		return p.emptyStateHint(th, width, height)
 	}
 
 	var b strings.Builder
@@ -178,8 +228,13 @@ func (p Playlists) viewList(th theme.Theme, width, height int) string {
 	}
 
 	// ── Key hints ──
-	hint := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
-	b.WriteString("\n " + hint.Render("c:create  e:edit  d:delete"))
+	b.WriteString("\n " + RenderHints(th, []Hint{
+		{"j/k · ↑↓", "move"},
+		{"Enter", "open"},
+		{"c", "create"},
+		{"e", "edit"},
+		{"d", "remove"},
+	}))
 
 	return b.String()
 }
@@ -280,8 +335,13 @@ func (p Playlists) viewTracks(th theme.Theme, width, height int) string {
 	}
 
 	// ── Key hints ──
-	hintStyle := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
-	b.WriteString("\n " + hintStyle.Render("d:remove  m:move to playlist"))
+	b.WriteString("\n " + RenderHints(th, []Hint{
+		{"j/k · ↑↓", "move"},
+		{"Enter", "play"},
+		{"d", "remove"},
+		{"m", "move to playlist"},
+		{"Esc", "back"},
+	}))
 
 	return b.String()
 }
