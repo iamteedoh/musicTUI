@@ -11,6 +11,7 @@ const (
 	ViewLyrics
 	ViewSettings
 	ViewHelp
+	ViewImport
 )
 
 type SidebarItem struct {
@@ -25,6 +26,7 @@ var SidebarItems = []SidebarItem{
 	{ViewSearch, "⌕ ", "Search"},
 	{ViewPlaylists, "≡ ", "Playlists"},
 	{ViewLyrics, "¶ ", "Lyrics"},
+	{ViewImport, "⇪ ", "Import"},
 	{ViewSettings, "✦ ", "Settings"},
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
 type App struct {
@@ -47,6 +48,9 @@ type App struct {
 	lyrics   components.Lyrics
 	artwork  components.Artwork
 	settings components.Settings
+	importv  components.Import
+	ytToken  *ytmusic.Token       // current in-memory YT Music token
+	ytDevice *ytmusic.DeviceAuth  // active device-code (cleared after success)
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
@@ -98,6 +102,7 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		lyrics:   components.NewLyrics(),
 		artwork:  components.NewArtwork(),
 		settings: components.NewSettings(),
+		importv:  components.NewImport(),
 		showLyrics: true,
 		playback:   model.PlaybackState{Volume: cfg.Volume},
 		queue:      model.NewQueue(),
@@ -108,6 +113,12 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	} else {
 		// First launch with no credentials — walk the user through setup.
 		app.onboard.Start()
+	}
+	// Hydrate YT Music token if present. A prior session might have
+	// authed already; reusing lets the import view skip straight to
+	// the authed stage.
+	if tok, err := ytmusic.LoadToken(); err == nil && tok != nil {
+		app.ytToken = tok
 	}
 	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
@@ -323,6 +334,48 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// don't loop, and surface a clean status message.
 		a.pendingRetryTrack = nil
 		a.status = "Auth error: " + msg.Err.Error()
+		return a, nil
+
+	// YT Music import
+	case YTDeviceCodeMsg:
+		a.ytDevice = msg.Auth
+		a.importv.Stage = components.ImportStageDeviceCode
+		a.importv.UserCode = msg.Auth.UserCode
+		a.importv.VerificationURL = msg.Auth.VerificationURL
+		return a, PollYTAuthCmd(msg.Auth.DeviceCode, msg.Auth.Interval)
+	case YTAuthSuccessMsg:
+		a.ytToken = msg.Token
+		a.ytDevice = nil
+		a.importv.Stage = components.ImportStageAuthed
+		return a, nil
+	case YTAuthErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
+		return a, nil
+	case YTLibraryLoadedMsg:
+		a.importv.Stage = components.ImportStageLibraryLoaded
+		a.importv.Playlists = msg.Playlists
+		a.importv.LikedCount = msg.LikedCount
+		a.importv.Albums = msg.Albums
+		a.importv.Artists = msg.Artists
+		return a, nil
+	case YTLibraryErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
+		return a, nil
+	case YTImportDoneMsg:
+		a.importv.Stage = components.ImportStageDone
+		a.importv.Summaries = msg.Summaries
+		// Refresh the sidebar playlist list to include newly-created
+		// [YT]-prefixed playlists.
+		if a.client != nil {
+			a.playlist.Items = nil
+			return a, FetchPlaylistsCmd(a.client, 0)
+		}
+		return a, nil
+	case YTImportErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
 		return a, nil
 
 	// Self-update
@@ -1200,6 +1253,13 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "h":
 			a.focus = model.FocusSidebar
 		}
+	case model.ViewImport:
+		switch msg.String() {
+		case "enter":
+			return a.handleImportEnter()
+		case "esc", "h":
+			a.focus = model.FocusSidebar
+		}
 	case model.ViewHelp:
 		switch msg.String() {
 		case "j", "down":
@@ -1415,6 +1475,43 @@ func (a App) handleRightKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// handleImportEnter drives the Import view state machine on Enter
+// presses. Each stage advances to the next appropriate command or
+// terminal state.
+func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
+	switch a.importv.Stage {
+	case components.ImportStageIdle, components.ImportStageError:
+		a.importv.Reset()
+		a.importv.Stage = components.ImportStageDeviceCode
+		a.importv.UserCode = "loading..."
+		return a, StartYTDeviceAuthCmd()
+	case components.ImportStageAuthed:
+		if a.ytToken == nil {
+			return a, nil
+		}
+		a.importv.Stage = components.ImportStageLoadingLibrary
+		return a, LoadYTLibraryCmd(a.ytToken)
+	case components.ImportStageLibraryLoaded:
+		if a.ytToken == nil || a.client == nil {
+			a.importv.Err = fmt.Errorf("Spotify client not ready — log in first")
+			a.importv.Stage = components.ImportStageError
+			return a, nil
+		}
+		a.importv.Stage = components.ImportStageImporting
+		a.importv.ProgressOverallTotal = len(a.importv.Playlists) + 1 // +1 for Liked
+		return a, RunYTImportCmd(a.ytToken, a.client)
+	case components.ImportStageDone:
+		// Run another import — reset and go back to authed stage
+		// (token is still valid, no need to re-auth).
+		a.importv.Reset()
+		if a.ytToken != nil && a.ytToken.Valid() {
+			a.importv.Stage = components.ImportStageAuthed
+		}
+		return a, nil
+	}
+	return a, nil
+}
+
 func (a App) viewTitle() string {
 	switch a.view {
 	case model.ViewHome:
@@ -1429,6 +1526,10 @@ func (a App) viewTitle() string {
 		return "VISUALIZER"
 	case model.ViewLyrics:
 		return "LYRICS"
+	case model.ViewImport:
+		return "IMPORT"
+	case model.ViewHelp:
+		return "HELP"
 	case model.ViewSettings:
 		return "SETTINGS"
 	default:
@@ -1603,6 +1704,15 @@ func (a App) View() string {
 		viewContent = a.settings.View(th, a.config, centerInnerW, viewH)
 	case model.ViewHelp:
 		viewContent = a.help.View(th, centerInnerW, viewH)
+	case model.ViewImport:
+		// If user lands on Import with a cached token already valid,
+		// skip straight to the authed stage so they don't see "press
+		// Enter to connect" for a connection they already have.
+		if a.ytToken != nil && a.ytToken.Valid() &&
+			a.importv.Stage == components.ImportStageIdle {
+			a.importv.Stage = components.ImportStageAuthed
+		}
+		viewContent = a.importv.View(th, centerInnerW, viewH)
 	default:
 		viewContent = lipgloss.NewStyle().
 			Foreground(th.FgMuted).Italic(true).

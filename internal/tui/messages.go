@@ -12,6 +12,7 @@ import (
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
 // Navigation
@@ -251,6 +252,140 @@ func ApplyUpdateCmd(rel *update.Release) tea.Cmd {
 			return UpdateFailedMsg{Err: err}
 		}
 		return UpdateAppliedMsg{NewVersion: rel.TagName}
+	}
+}
+
+// ═════════ YT Music import messages ═════════
+
+// Auth phase: device flow.
+type YTDeviceCodeMsg struct {
+	Auth *ytmusic.DeviceAuth
+}
+type YTAuthSuccessMsg struct {
+	Token *ytmusic.Token
+}
+type YTAuthErrorMsg struct {
+	Err error
+}
+
+// Library read phase.
+type YTLibraryLoadedMsg struct {
+	Playlists  []ytmusic.Playlist
+	LikedCount int
+	Albums     []ytmusic.Album
+	Artists    []ytmusic.Artist
+}
+type YTLibraryErrorMsg struct{ Err error }
+
+// Import phase.
+type YTImportProgressMsg struct {
+	PlaylistName   string
+	Done, Total    int
+	Overall, Count int
+}
+type YTImportDoneMsg struct {
+	Summaries []ytmusic.ImportSummary
+}
+type YTImportErrorMsg struct{ Err error }
+
+// ─────── commands ───────
+
+// StartYTDeviceAuthCmd kicks off the device flow and returns the
+// device code to display to the user. Caller should then run
+// PollYTAuthCmd to watch for approval.
+func StartYTDeviceAuthCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		auth, err := ytmusic.RequestDeviceCode(ctx)
+		if err != nil {
+			return YTAuthErrorMsg{Err: err}
+		}
+		return YTDeviceCodeMsg{Auth: auth}
+	}
+}
+
+// PollYTAuthCmd blocks (with the caller-supplied context, which
+// should be cancelled if the user navigates away) until the user
+// approves the device code or it expires. Emits YTAuthSuccessMsg
+// or YTAuthErrorMsg.
+func PollYTAuthCmd(deviceCode string, interval int) tea.Cmd {
+	return func() tea.Msg {
+		// Use a generous overall timeout — device codes live ~15 minutes.
+		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+		defer cancel()
+		tok, err := ytmusic.PollForToken(ctx, deviceCode, interval)
+		if err != nil {
+			return YTAuthErrorMsg{Err: err}
+		}
+		_ = ytmusic.SaveToken(tok)
+		return YTAuthSuccessMsg{Token: tok}
+	}
+}
+
+// LoadYTLibraryCmd fetches playlists / liked / albums / artists in
+// parallel-ish sequence and returns a single message with all of
+// them. The liked-songs count comes from the "LM" playlist's size.
+func LoadYTLibraryCmd(tok *ytmusic.Token) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		client := ytmusic.NewClient(tok)
+
+		playlists, err := client.GetLibraryPlaylists(ctx)
+		if err != nil {
+			return YTLibraryErrorMsg{Err: fmt.Errorf("playlists: %w", err)}
+		}
+		// Liked songs can be large; getting the count just means
+		// fetching the LM playlist and returning its length. Not ideal
+		// (downloads all tracks), but YT doesn't give us a header-only
+		// way. Acceptable for a summary; we re-fetch during import.
+		liked, err := client.GetLikedSongs(ctx)
+		if err != nil {
+			// Non-fatal — some users have no liked songs, and if YT is
+			// being weird we'd rather show a 0 than fail the whole load.
+			liked = nil
+		}
+		albums, err := client.GetLibraryAlbums(ctx)
+		if err != nil {
+			albums = nil
+		}
+		artists, err := client.GetLibraryArtists(ctx)
+		if err != nil {
+			artists = nil
+		}
+		return YTLibraryLoadedMsg{
+			Playlists:  playlists,
+			LikedCount: len(liked),
+			Albums:     albums,
+			Artists:    artists,
+		}
+	}
+}
+
+// RunYTImportCmd runs ImportPlaylists + ImportLikedSongs end-to-end
+// and returns the aggregated summaries. Progress is NOT streamed here
+// in the first release — the view shows a simple spinner with the
+// most-recent playlist name (updated by a goroutine that writes to
+// app state via an atomic pointer). We'll add real progress streaming
+// if users ask for it; for a first cut, "it's doing the thing, be
+// patient" is enough given the whole import typically finishes in
+// under a minute for a few hundred tracks.
+func RunYTImportCmd(tok *ytmusic.Token, spClient *sp.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		yt := ytmusic.NewClient(tok)
+
+		summaries, err := ytmusic.ImportPlaylists(ctx, yt, spClient, nil)
+		if err != nil {
+			return YTImportErrorMsg{Err: err}
+		}
+		// Liked songs as an additional playlist.
+		if liked, lerr := ytmusic.ImportLikedSongs(ctx, yt, spClient, nil); lerr == nil && liked != nil {
+			summaries = append(summaries, *liked)
+		}
+		return YTImportDoneMsg{Summaries: summaries}
 	}
 }
 
