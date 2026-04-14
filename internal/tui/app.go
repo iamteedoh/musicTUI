@@ -22,6 +22,7 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musicTUI/internal/applemusic"
 	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
@@ -49,8 +50,9 @@ type App struct {
 	artwork  components.Artwork
 	settings components.Settings
 	importv  components.Import
-	ytToken  *ytmusic.Token       // current in-memory YT Music token
-	ytDevice *ytmusic.DeviceAuth  // active device-code (cleared after success)
+	ytToken  *ytmusic.Token          // current in-memory YT Music token
+	ytDevice *ytmusic.DeviceAuth     // active device-code (cleared after success)
+	amCreds  *applemusic.Credentials // current Apple Music credentials
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
@@ -120,6 +122,13 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	if tok, err := ytmusic.LoadToken(); err == nil && tok != nil {
 		app.ytToken = tok
 	}
+	// Same for Apple Music credentials.
+	if ac, err := applemusic.LoadCredentials(); err == nil && ac != nil {
+		app.amCreds = ac
+	}
+	// Flag whether Apple Music import is ready to use — needs both
+	// developer token and auth page URL configured.
+	app.importv.AppleConfigured = cfg.AppleMusic.DeveloperToken != "" && cfg.AppleMusic.AuthPageURL != ""
 	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
 }
@@ -374,6 +383,51 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case YTImportErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
+		return a, nil
+
+	// Apple Music import
+	case AMAuthSuccessMsg:
+		a.amCreds = msg.Creds
+		a.importv.Stage = components.ImportStageAuthed
+		return a, nil
+	case AMAuthErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
+		return a, nil
+	case AMLibraryLoadedMsg:
+		a.importv.Stage = components.ImportStageLibraryLoaded
+		// Convert Apple Music types into the generic slices the view
+		// already renders — the view only reads counts + names, so
+		// re-using the YT Music shape keeps rendering unchanged.
+		a.importv.Playlists = make([]ytmusic.Playlist, len(msg.Playlists))
+		for i, pl := range msg.Playlists {
+			a.importv.Playlists[i] = ytmusic.Playlist{ID: pl.ID, Name: pl.Name, TrackCount: pl.TrackCount}
+		}
+		a.importv.LikedCount = msg.LikedCount
+		a.importv.Albums = make([]ytmusic.Album, len(msg.Albums))
+		for i, al := range msg.Albums {
+			a.importv.Albums[i] = ytmusic.Album{BrowseID: al.ID, Name: al.Name, Artists: al.Artists, Year: al.Year}
+		}
+		a.importv.Artists = make([]ytmusic.Artist, len(msg.Artists))
+		for i, ar := range msg.Artists {
+			a.importv.Artists[i] = ytmusic.Artist{ChannelID: ar.ID, Name: ar.Name}
+		}
+		return a, nil
+	case AMLibraryErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = msg.Err
+		return a, nil
+	case AMImportDoneMsg:
+		a.importv.Stage = components.ImportStageDone
+		a.importv.Summaries = msg.Summaries
+		if a.client != nil {
+			a.playlist.Items = nil
+			return a, FetchPlaylistsCmd(a.client, 0)
+		}
+		return a, nil
+	case AMImportErrorMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
@@ -1255,6 +1309,10 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case model.ViewImport:
 		switch msg.String() {
+		case "j", "down":
+			a.importv.SelectDown()
+		case "k", "up":
+			a.importv.SelectUp()
 		case "enter":
 			return a.handleImportEnter()
 		case "esc", "h":
@@ -1477,35 +1535,90 @@ func (a App) handleRightKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleImportEnter drives the Import view state machine on Enter
 // presses. Each stage advances to the next appropriate command or
-// terminal state.
+// terminal state; the selected source (YT / Apple) determines which
+// command runs at each step.
 func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
 	switch a.importv.Stage {
-	case components.ImportStageIdle, components.ImportStageError:
-		a.importv.Reset()
-		a.importv.Stage = components.ImportStageDeviceCode
-		a.importv.UserCode = "loading..."
-		return a, StartYTDeviceAuthCmd()
-	case components.ImportStageAuthed:
-		if a.ytToken == nil {
+	case components.ImportStageIdle:
+		// Lock in the selected source and kick off its auth path.
+		switch a.importv.Selected {
+		case 0:
+			a.importv.Source = components.SourceYT
+		case 1:
+			a.importv.Source = components.SourceApple
+		}
+		if a.importv.Source == components.SourceApple && !a.importv.AppleConfigured {
+			a.importv.Err = fmt.Errorf("Apple Music is not configured. See the README's 'Apple Music Setup' section for the one-time steps (Apple Developer token + auth page URL).")
+			a.importv.Stage = components.ImportStageError
 			return a, nil
 		}
+		// If we already have valid creds for this source, skip auth.
+		switch a.importv.Source {
+		case components.SourceYT:
+			if a.ytToken != nil && a.ytToken.Valid() {
+				a.importv.Stage = components.ImportStageAuthed
+				return a, nil
+			}
+			a.importv.Stage = components.ImportStageDeviceCode
+			a.importv.UserCode = "loading..."
+			return a, StartYTDeviceAuthCmd()
+		case components.SourceApple:
+			if a.amCreds != nil && a.amCreds.MusicUserToken != "" {
+				a.importv.Stage = components.ImportStageAuthed
+				return a, nil
+			}
+			a.importv.Stage = components.ImportStageDeviceCode
+			a.importv.UserCode = "browser opening..."
+			a.importv.VerificationURL = a.config.AppleMusic.AuthPageURL
+			return a, StartAMAuthCmd(a.config.AppleMusic.AuthPageURL,
+				a.config.AppleMusic.DeveloperToken,
+				a.config.AppleMusic.CallbackPort)
+		}
+	case components.ImportStageError:
+		a.importv.Reset()
+		return a, nil
+	case components.ImportStageAuthed:
 		a.importv.Stage = components.ImportStageLoadingLibrary
-		return a, LoadYTLibraryCmd(a.ytToken)
+		switch a.importv.Source {
+		case components.SourceYT:
+			if a.ytToken == nil {
+				return a, nil
+			}
+			return a, LoadYTLibraryCmd(a.ytToken)
+		case components.SourceApple:
+			if a.amCreds == nil {
+				return a, nil
+			}
+			return a, LoadAMLibraryCmd(a.amCreds)
+		}
 	case components.ImportStageLibraryLoaded:
-		if a.ytToken == nil || a.client == nil {
+		if a.client == nil {
 			a.importv.Err = fmt.Errorf("Spotify client not ready — log in first")
 			a.importv.Stage = components.ImportStageError
 			return a, nil
 		}
 		a.importv.Stage = components.ImportStageImporting
-		a.importv.ProgressOverallTotal = len(a.importv.Playlists) + 1 // +1 for Liked
-		return a, RunYTImportCmd(a.ytToken, a.client)
+		a.importv.ProgressOverallTotal = len(a.importv.Playlists) + 1
+		switch a.importv.Source {
+		case components.SourceYT:
+			return a, RunYTImportCmd(a.ytToken, a.client)
+		case components.SourceApple:
+			return a, RunAMImportCmd(a.amCreds, a.client)
+		}
 	case components.ImportStageDone:
-		// Run another import — reset and go back to authed stage
-		// (token is still valid, no need to re-auth).
+		// Reset and go back to the authed stage of the same source.
+		savedSource := a.importv.Source
 		a.importv.Reset()
-		if a.ytToken != nil && a.ytToken.Valid() {
-			a.importv.Stage = components.ImportStageAuthed
+		a.importv.Source = savedSource
+		switch savedSource {
+		case components.SourceYT:
+			if a.ytToken != nil && a.ytToken.Valid() {
+				a.importv.Stage = components.ImportStageAuthed
+			}
+		case components.SourceApple:
+			if a.amCreds != nil && a.amCreds.MusicUserToken != "" {
+				a.importv.Stage = components.ImportStageAuthed
+			}
 		}
 		return a, nil
 	}
@@ -1705,13 +1818,6 @@ func (a App) View() string {
 	case model.ViewHelp:
 		viewContent = a.help.View(th, centerInnerW, viewH)
 	case model.ViewImport:
-		// If user lands on Import with a cached token already valid,
-		// skip straight to the authed stage so they don't see "press
-		// Enter to connect" for a connection they already have.
-		if a.ytToken != nil && a.ytToken.Valid() &&
-			a.importv.Stage == components.ImportStageIdle {
-			a.importv.Stage = components.ImportStageAuthed
-		}
 		viewContent = a.importv.View(th, centerInnerW, viewH)
 	default:
 		viewContent = lipgloss.NewStyle().

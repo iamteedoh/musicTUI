@@ -582,11 +582,80 @@ make build-windows   # Windows (amd64)
 
 ---
 
+## Importing from YouTube Music / Apple Music
+
+musicTUI can import your playlists, liked songs, and library albums
+from YouTube Music or Apple Music into your Spotify library as new
+playlists (prefixed with `[YT]` or `[AM]` so you can spot the imports
+and clean up later if anything goes wrong).
+
+Open the **Import** screen from the left sidebar and pick a source.
+
+### YouTube Music (no setup required)
+
+1. Select **YouTube Music**, press Enter.
+2. musicTUI shows a short code and a URL — typically
+   `https://www.google.com/device` or `youtube.com/activate`.
+3. Open that URL on any phone or laptop, enter the code, sign in to
+   your Google account, approve the request.
+4. musicTUI fetches your library summary; press Enter again to start
+   the import.
+
+Your Spotify library will get new playlists prefixed with `[YT]`.
+
+### Apple Music (one-time setup)
+
+Because Apple's MusicKit framework can't be called from Go directly,
+the Apple Music import requires two one-time setup tasks: an Apple
+Developer Program membership ($99/yr) and hosting a tiny HTML page
+somewhere over HTTPS. Once set up, the end-user flow is a single
+browser click.
+
+**1. Get your Apple Developer credentials**
+
+- Enroll in the Apple Developer Program at
+  [developer.apple.com](https://developer.apple.com).
+- Create a MusicKit identifier and Media Key under Certificates, IDs
+  & Profiles.
+- Download the `.p8` private key. Keep it safe — it can't be re-
+  downloaded.
+- Generate a developer token (a JWT signed with that key). Apple's
+  docs have the format; there are plenty of ES256-JWT tools. The
+  token is valid for up to 180 days.
+
+**2. Host the auth page**
+
+The `page/apple-auth/` directory in this repo is a single static HTML
+file that uses MusicKit JS to get a Music User Token from the user,
+then POSTs it to a local callback URL musicTUI is listening on.
+
+- Serve `page/apple-auth/index.html` over HTTPS anywhere you control
+  (your homelab, S3, Netlify, GitHub Pages, etc.).
+- MusicKit JS requires HTTPS; `localhost` will also work for testing.
+
+**3. Configure musicTUI**
+
+Edit `~/.config/musicTUI/config.toml` (Linux/Mac) or
+`%APPDATA%\musicTUI\config.toml` (Windows) and add:
+
+```toml
+[apple_music]
+developer_token = "eyJ...your ES256-signed JWT..."
+auth_page_url = "https://music-auth.yourhomelab.example/"
+callback_port = 0  # 0 = auto-pick a free port each session
+```
+
+Restart musicTUI. On the Import screen, the Apple Music option will
+flip from `⚠ needs setup` to selectable. Pressing Enter opens your
+hosted auth page in the user's browser; after they complete MusicKit
+sign-in, the token is POSTed back and the import proceeds.
+
+---
+
 ## Roadmap
 
 Planned features for future releases:
 
-- **YouTube Music Support — Under Investigation**
 - **Local Music Playback Support**
 
 ---

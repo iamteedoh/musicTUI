@@ -11,13 +11,32 @@ type SpotifyConfig struct {
 	ClientID string `toml:"client_id"`
 }
 
+// AppleMusicConfig holds the user-supplied values needed for the
+// Apple Music import path. All fields optional — when the developer
+// token or auth page URL are empty, the Import view treats Apple
+// Music as "not configured" and shows setup instructions instead of
+// attempting an auth flow.
+//
+// Why this is in config rather than obtained automatically:
+//   - DeveloperToken is a JWT signed by an Apple Developer private
+//     key (.p8). Generating it requires paid Apple Developer
+//     membership; musicTUI can't do it.
+//   - AuthPageURL is the HTTPS URL where the static MusicKit JS page
+//     (page/apple-auth/index.html) is hosted. User-specific.
+type AppleMusicConfig struct {
+	DeveloperToken string `toml:"developer_token"`
+	AuthPageURL    string `toml:"auth_page_url"`
+	CallbackPort   int    `toml:"callback_port"` // 0 = auto-pick
+}
+
 type Config struct {
-	Theme               string        `toml:"theme"`
-	TickRateMs          int           `toml:"tick_rate_ms"`
-	FrameRate           int           `toml:"frame_rate"`
-	Volume              int           `toml:"volume"`
-	CheckDuplicates     bool          `toml:"check_duplicates"`
-	Spotify             SpotifyConfig `toml:"spotify"`
+	Theme               string           `toml:"theme"`
+	TickRateMs          int              `toml:"tick_rate_ms"`
+	FrameRate           int              `toml:"frame_rate"`
+	Volume              int              `toml:"volume"`
+	CheckDuplicates     bool             `toml:"check_duplicates"`
+	Spotify             SpotifyConfig    `toml:"spotify"`
+	AppleMusic          AppleMusicConfig `toml:"apple_music"`
 }
 
 func Default() Config {

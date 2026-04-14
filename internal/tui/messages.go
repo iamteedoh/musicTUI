@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,7 @@ import (
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musicTUI/internal/applemusic"
 	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
@@ -386,6 +388,125 @@ func RunYTImportCmd(tok *ytmusic.Token, spClient *sp.Client) tea.Cmd {
 			summaries = append(summaries, *liked)
 		}
 		return YTImportDoneMsg{Summaries: summaries}
+	}
+}
+
+// ═════════ Apple Music import messages ═════════
+
+// AMAuthPageMsg is emitted right after we've started the local
+// callback listener and constructed the browser URL. The TUI then
+// opens the URL, stays on a waiting screen, and a subsequent
+// AMAuthSuccessMsg lands when the user completes sign-in.
+type AMAuthPageMsg struct {
+	URL string // URL we opened in the browser
+}
+type AMAuthSuccessMsg struct {
+	Creds *applemusic.Credentials
+}
+type AMAuthErrorMsg struct{ Err error }
+
+type AMLibraryLoadedMsg struct {
+	Playlists  []applemusic.Playlist
+	LikedCount int
+	Albums     []applemusic.Album
+	Artists    []applemusic.Artist
+}
+type AMLibraryErrorMsg struct{ Err error }
+
+type AMImportDoneMsg struct {
+	Summaries []applemusic.ImportSummary
+}
+type AMImportErrorMsg struct{ Err error }
+
+// StartAMAuthCmd launches the Apple Music callback-listener + opens
+// the hosted auth page in the user's browser. The browser flow
+// completes asynchronously; AMAuthSuccessMsg lands when MusicKit hands
+// us the Music User Token.
+func StartAMAuthCmd(authPageURL, developerToken string, port int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		// intentionally don't cancel() here — the callback listener
+		// lives for the duration of the flow. The timeout still
+		// bounds it.
+		_ = cancel
+
+		cbURL, state, ch, err := applemusic.StartCallbackServer(ctx, port)
+		if err != nil {
+			return AMAuthErrorMsg{Err: fmt.Errorf("start callback server: %w", err)}
+		}
+
+		// Build the browser URL with dev token + callback + state.
+		u, err := url.Parse(authPageURL)
+		if err != nil {
+			return AMAuthErrorMsg{Err: fmt.Errorf("invalid auth_page_url: %w", err)}
+		}
+		q := u.Query()
+		q.Set("dev", developerToken)
+		q.Set("cb", cbURL)
+		q.Set("state", state)
+		u.RawQuery = q.Encode()
+
+		go func() {
+			// Fire in a goroutine so we can return the URL to the UI
+			// immediately; the actual browser exec can take a beat.
+			openBrowser(u.String())
+		}()
+
+		select {
+		case res := <-ch:
+			if res.Err != nil {
+				return AMAuthErrorMsg{Err: res.Err}
+			}
+			creds := &applemusic.Credentials{
+				DeveloperToken: developerToken,
+				MusicUserToken: res.MusicUserToken,
+				ObtainedAt:     time.Now(),
+			}
+			_ = applemusic.SaveCredentials(creds)
+			return AMAuthSuccessMsg{Creds: creds}
+		case <-ctx.Done():
+			return AMAuthErrorMsg{Err: fmt.Errorf("timeout waiting for Apple Music sign-in")}
+		}
+	}
+}
+
+// LoadAMLibraryCmd fetches playlists / library songs / albums /
+// artists. Mirrors LoadYTLibraryCmd.
+func LoadAMLibraryCmd(creds *applemusic.Credentials) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		am := applemusic.NewClient(creds)
+		playlists, err := am.GetLibraryPlaylists(ctx)
+		if err != nil {
+			return AMLibraryErrorMsg{Err: fmt.Errorf("playlists: %w", err)}
+		}
+		liked, _ := am.GetLikedSongs(ctx)
+		albums, _ := am.GetLibraryAlbums(ctx)
+		artists, _ := am.GetLibraryArtists(ctx)
+		return AMLibraryLoadedMsg{
+			Playlists:  playlists,
+			LikedCount: len(liked),
+			Albums:     albums,
+			Artists:    artists,
+		}
+	}
+}
+
+// RunAMImportCmd does the full Apple Music import.
+func RunAMImportCmd(creds *applemusic.Credentials, spClient *sp.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		am := applemusic.NewClient(creds)
+		summaries, err := applemusic.ImportPlaylists(ctx, am, spClient)
+		if err != nil {
+			return AMImportErrorMsg{Err: err}
+		}
+		if liked, lerr := applemusic.ImportLikedSongs(ctx, am, spClient); lerr == nil && liked != nil {
+			summaries = append(summaries, *liked)
+		}
+		return AMImportDoneMsg{Summaries: summaries}
 	}
 }
 

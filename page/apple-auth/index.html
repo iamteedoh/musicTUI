@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>musicTUI — Apple Music sign-in</title>
+<script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" data-web-components async></script>
+<style>
+  :root {
+    --bg: #0e0f13;
+    --fg: #e3e6ed;
+    --muted: #8a92a6;
+    --accent: #fa586a;
+    --accent-dim: #4a1520;
+    --card: #181a22;
+    --border: #2a2d38;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .card {
+    max-width: 28rem; width: 100%;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem; color: var(--accent); }
+  p  { color: var(--muted); margin: .5rem 0 1rem; }
+  button {
+    font: inherit;
+    padding: .85rem 1.2rem;
+    border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff;
+    cursor: pointer; font-weight: 600;
+    width: 100%;
+  }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  #status { font-size: .9rem; margin-top: 1rem; }
+  #status.ok   { color: #6ce07c; }
+  #status.err  { color: #fa586a; }
+  code {
+    background: var(--bg); padding: 2px 6px;
+    border: 1px solid var(--border); border-radius: 4px;
+    font-size: .85em;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Connect Apple Music to musicTUI</h1>
+    <p>This page uses MusicKit to sign you in to Apple Music, then sends the
+       session token back to the musicTUI running on your computer. Nothing
+       about your Apple ID is stored here.</p>
+    <button id="signin" disabled>Sign in with Apple Music</button>
+    <div id="status">Loading MusicKit…</div>
+  </div>
+
+<script>
+(function () {
+  // Query string: ?dev=<developer token>&cb=<local callback url>&state=<nonce>
+  //
+  // - dev:   JWT signed by your Apple Developer private key (.p8).
+  //          Passed by musicTUI so this page doesn't need to embed one.
+  //          Expires in up to 180 days; regenerate with any standard
+  //          ES256 JWT tool.
+  // - cb:    URL the local musicTUI TCP listener exposed. We POST the
+  //          Music User Token there once MusicKit hands it over.
+  // - state: random nonce. Musictui's local server rejects callbacks
+  //          whose state doesn't match its outstanding one, preventing
+  //          an accidental cross-tab leak.
+  const q = new URLSearchParams(window.location.search);
+  const dev = q.get('dev');
+  const cb  = q.get('cb');
+  const state = q.get('state');
+
+  const status = document.getElementById('status');
+  const btn = document.getElementById('signin');
+
+  function show(msg, kind) {
+    status.textContent = msg;
+    status.className = kind || '';
+  }
+
+  if (!dev || !cb || !state) {
+    show('Missing dev/cb/state query parameters — open this page from musicTUI.', 'err');
+    return;
+  }
+
+  document.addEventListener('musickitloaded', async () => {
+    try {
+      await MusicKit.configure({
+        developerToken: dev,
+        app: { name: 'musicTUI', build: '1.0' },
+      });
+      btn.disabled = false;
+      show('Ready. Click the button to sign in.');
+    } catch (e) {
+      show('MusicKit init failed: ' + e.message, 'err');
+    }
+  });
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    show('Opening Apple Music sign-in…');
+    try {
+      const music = MusicKit.getInstance();
+      const mut = await music.authorize(); // Music User Token
+      show('Signed in. Sending token to musicTUI…');
+      const resp = await fetch(cb, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ music_user_token: mut, state: state }),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error('local callback rejected: ' + resp.status + ' ' + text);
+      }
+      show('All set — you can close this tab and return to musicTUI.', 'ok');
+      btn.textContent = 'Done';
+    } catch (e) {
+      show('Sign-in failed: ' + (e.message || e), 'err');
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

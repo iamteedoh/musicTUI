@@ -9,6 +9,17 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
+// ImportSource identifies which upstream the user picked to import
+// from. Set in ImportStageIdle when the user chooses and read by the
+// app's key handler to route into the right command.
+type ImportSource int
+
+const (
+	SourceNone   ImportSource = iota
+	SourceYT     // YouTube Music
+	SourceApple  // Apple Music
+)
+
 // ImportStage is the high-level state of the import view. The app
 // transitions between stages as async commands (device-code request,
 // auth polling, library reads, the import itself) complete.
@@ -16,7 +27,7 @@ type ImportStage int
 
 const (
 	// ImportStageIdle: user hasn't started anything yet. Shows a
-	// welcome card and "press Enter to connect YouTube Music" prompt.
+	// source picker (YouTube Music / Apple Music).
 	ImportStageIdle ImportStage = iota
 	// ImportStageDeviceCode: device-flow in progress. We have a user
 	// code to show; we're polling Google every N seconds for approval.
@@ -43,7 +54,14 @@ const (
 // Import is the state + renderer for the Import screen. Most fields
 // are populated by the app's message handlers as async commands land.
 type Import struct {
-	Stage ImportStage
+	Stage  ImportStage
+	Source ImportSource // chosen during Idle; drives which command runs
+
+	// Source-selector state — which option is highlighted in Idle
+	Selected int // 0 = YouTube Music, 1 = Apple Music
+
+	// Apple Music specific: true iff AppleMusic config is populated
+	AppleConfigured bool
 
 	// Device-flow display
 	UserCode        string
@@ -72,9 +90,23 @@ func NewImport() Import {
 }
 
 // Reset clears everything back to the idle state. Called on close-and-
-// reopen so re-running an import starts clean.
+// reopen so re-running an import starts clean. AppleConfigured stays
+// since it's a derived config flag, not session state.
 func (i *Import) Reset() {
-	*i = Import{Stage: ImportStageIdle}
+	apple := i.AppleConfigured
+	*i = Import{Stage: ImportStageIdle, AppleConfigured: apple}
+}
+
+// SelectUp / SelectDown move the highlight in the source picker.
+func (i *Import) SelectUp() {
+	if i.Stage == ImportStageIdle && i.Selected > 0 {
+		i.Selected--
+	}
+}
+func (i *Import) SelectDown() {
+	if i.Stage == ImportStageIdle && i.Selected < 1 {
+		i.Selected++
+	}
 }
 
 func (i Import) View(th theme.Theme, width, height int) string {
@@ -111,21 +143,53 @@ func (i Import) View(th theme.Theme, width, height int) string {
 func (i Import) viewIdle(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(66)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(66)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+	selected := lipgloss.NewStyle().
+		Foreground(th.Surface).
+		Background(th.Accent).
+		Bold(true).
+		Padding(0, 1)
+	unselected := lipgloss.NewStyle().Foreground(th.Fg).Padding(0, 1)
+
 	var b strings.Builder
-	b.WriteString(" " + body.Render("Import your YouTube Music playlists, liked songs, and saved albums into your Spotify library. This runs on demand — it won't do anything automatically."))
+	b.WriteString(" " + body.Render("Import your playlists and library from another streaming service into Spotify. This runs on demand — nothing happens automatically."))
 	b.WriteString("\n\n")
-	b.WriteString(" " + muted.Render("What you'll do:"))
-	b.WriteString("\n")
-	b.WriteString(" " + muted.Render("  1. Press Enter to get a short code."))
-	b.WriteString("\n")
-	b.WriteString(" " + muted.Render("  2. Open youtube.com/activate on any device, enter the code."))
-	b.WriteString("\n")
-	b.WriteString(" " + muted.Render("  3. Approve access. We'll fetch your library."))
-	b.WriteString("\n")
-	b.WriteString(" " + muted.Render("  4. You choose what to import. Imported playlists get a [YT] prefix."))
+	b.WriteString(" " + accent.Render("Choose a source:"))
 	b.WriteString("\n\n")
-	b.WriteString(" " + RenderHints(th, []Hint{
-		{"Enter", "connect YouTube Music"},
+
+	// Source picker
+	opts := []struct {
+		label string
+		hint  string
+		ready bool
+	}{
+		{"YouTube Music", "one-time sign-in with a short code", true},
+		{"Apple Music", "", i.AppleConfigured},
+	}
+	if opts[1].ready {
+		opts[1].hint = "one-time sign-in via your Apple Developer page"
+	} else {
+		opts[1].hint = "⚠ needs setup — see README (Apple Music Setup)"
+	}
+
+	for idx, opt := range opts {
+		marker := "  "
+		labelStyle := unselected
+		if idx == i.Selected {
+			marker = "▸ "
+			labelStyle = selected
+		}
+		line := " " + marker + labelStyle.Render(opt.label)
+		if opt.hint != "" {
+			line += "  " + muted.Render(opt.hint)
+		}
+		b.WriteString(line + "\n")
+	}
+
+	b.WriteString("\n " + muted.Render("Imported playlists are created with a prefix ([YT] or [AM]) so you can spot them in your Spotify sidebar and clean up later if anything goes wrong."))
+	b.WriteString("\n\n " + RenderHints(th, []Hint{
+		{"j/k · ↑↓", "pick"},
+		{"Enter", "start"},
 		{"Esc", "back"},
 	}))
 	return b.String()
