@@ -53,6 +53,7 @@ type App struct {
 	artwork  components.Artwork
 	settings components.Settings
 	importv            components.Import
+	importsetup        components.ImportSetup
 	importClient       *importbackend.Client
 	importEvents       <-chan importer.Event // active import event stream; nil when no import is running
 	importEventsCancel context.CancelFunc    // cancels the importer goroutine on view exit
@@ -113,7 +114,8 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		lyrics:   components.NewLyrics(),
 		artwork:  components.NewArtwork(),
 		settings: components.NewSettings(),
-		importv:  components.NewImport(),
+		importv:     components.NewImport(),
+		importsetup: components.NewImportSetup(),
 		showLyrics: true,
 		playback:   model.PlaybackState{Volume: cfg.Volume},
 		queue:      model.NewQueue(),
@@ -906,6 +908,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.onboard.Active {
 		return a.handleOnboardKey(msg)
 	}
+	// Import setup wizard takes over while active (similar full-screen
+	// takeover as Onboard).
+	if a.importsetup.Active {
+		return a.handleImportSetupKey(msg)
+	}
 	// Modal captures all input when active
 	if a.modal.Active {
 		return a.handleModalKey(msg)
@@ -1135,6 +1142,113 @@ func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o", "O":
 		if a.onboard.Step == 1 {
 			openBrowser("https://developer.spotify.com/dashboard")
+		}
+		return a, nil
+	}
+	return a, nil
+}
+
+func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+
+	switch s {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "esc":
+		a.importsetup.Close()
+		return a, nil
+	case "left", "h":
+		if !a.importsetup.IsInputStep() {
+			a.importsetup.Prev()
+			return a, nil
+		}
+	}
+
+	// Final "Done" step: Enter saves + closes.
+	if a.importsetup.IsFinalStep() && s == "enter" {
+		gID, gSecret, sSecret := a.importsetup.Trimmed()
+		if !a.importsetup.Complete() {
+			a.importsetup.Error = "All three fields are required — go back and fill them in."
+			return a, nil
+		}
+		a.config.Import.GoogleClientID = gID
+		a.config.Import.GoogleClientSecret = gSecret
+		a.config.Import.SpotifyClientSecret = sSecret
+		if err := config.Save(a.config); err != nil {
+			a.importsetup.Error = "Failed to save config: " + err.Error()
+			return a, nil
+		}
+		// Build the importbackend client now that creds are present.
+		dir, _ := config.ConfigDir()
+		if dir != "" {
+			dir += "/import"
+		}
+		client, err := importbackend.NewClient(
+			dir,
+			oauth.GoogleConfig{ClientID: gID, ClientSecret: gSecret},
+			oauth.SpotifyConfig{ClientID: a.config.Spotify.ClientID, ClientSecret: sSecret},
+		)
+		if err != nil {
+			a.importsetup.Error = "Couldn't initialise import client: " + err.Error()
+			return a, nil
+		}
+		a.importClient = client
+		a.importv = components.NewImport() // resets to Idle; clears NotConfigured
+		a.importsetup.Close()
+		return a, nil
+	}
+
+	// Input steps: type into the active field.
+	if a.importsetup.IsInputStep() {
+		switch s {
+		case "tab":
+			a.importsetup.SwitchField()
+			return a, nil
+		case "enter":
+			// Validate this step's fields before advancing.
+			if a.importsetup.Step == 5 {
+				if g, gs, _ := a.importsetup.Trimmed(); g == "" || gs == "" {
+					a.importsetup.Error = "Both Client ID and Client Secret are required."
+					return a, nil
+				}
+			} else if a.importsetup.Step == 7 {
+				if _, _, ss := a.importsetup.Trimmed(); ss == "" {
+					a.importsetup.Error = "Spotify Client Secret is required."
+					return a, nil
+				}
+			}
+			a.importsetup.Error = ""
+			a.importsetup.Next()
+			return a, nil
+		case "backspace":
+			a.importsetup.Backspace()
+			return a, nil
+		default:
+			if len(msg.Runes) > 1 {
+				// Likely a paste — bulk insert.
+				a.importsetup.Paste(string(msg.Runes))
+				return a, nil
+			}
+			if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
+				a.importsetup.InputChar(rune(s[0]))
+				return a, nil
+			}
+			for _, r := range msg.Runes {
+				a.importsetup.InputChar(r)
+			}
+			return a, nil
+		}
+	}
+
+	// Non-input, non-final steps: navigation + browser-open.
+	switch s {
+	case "enter", "right", "l":
+		a.importsetup.Error = ""
+		a.importsetup.Next()
+		return a, nil
+	case "o", "O":
+		if url := a.importsetup.URLForStep(); url != "" {
+			openBrowser(url)
 		}
 		return a, nil
 	}
@@ -1676,9 +1790,15 @@ func (a App) handleRightKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // check) → AwaitingAuth (per-service loopback OAuth, sequential)
 // → LoadingLibrary → LibraryLoaded → Importing → Done/Error.
 func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
-	if a.importClient == nil {
-		a.importv.Err = fmt.Errorf("import requires Google Cloud OAuth credentials — re-run onboarding to add them")
-		a.importv.Stage = components.ImportStageError
+	// If the user hits Enter on the "not configured" screen, launch
+	// the import setup wizard rather than dropping into an error.
+	if a.importv.Stage == components.ImportStageNotConfigured ||
+		a.importClient == nil {
+		a.importsetup.Start(
+			a.config.Import.GoogleClientID,
+			a.config.Import.GoogleClientSecret,
+			a.config.Import.SpotifyClientSecret,
+		)
 		return a, nil
 	}
 	switch a.importv.Stage {
@@ -1766,6 +1886,9 @@ func (a App) View() string {
 
 	if a.onboard.Active {
 		return a.onboard.View(a.theme, a.width, a.height)
+	}
+	if a.importsetup.Active {
+		return a.importsetup.View(a.theme, a.width, a.height)
 	}
 
 	th := a.theme

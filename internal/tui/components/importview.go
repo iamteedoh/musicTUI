@@ -151,29 +151,16 @@ func (i Import) viewNotConfigured(th theme.Theme, w int) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(w)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
 
 	var b strings.Builder
-	b.WriteString(" " + warn.Render("⚠ Import not configured") + "\n\n")
-	b.WriteString(" " + body.Render("The library import feature needs OAuth credentials for Google Cloud (YouTube) and Spotify. Each user creates their own — that way no tokens leave your machine."))
+	b.WriteString(" " + accent.Render("Import — first-time setup") + "\n\n")
+	b.WriteString(" " + body.Render("The library import feature needs OAuth credentials for Google Cloud (YouTube) and Spotify. Each user creates their own free OAuth apps — no tokens ever leave your machine, no shared quota, no signup."))
 	b.WriteString("\n\n")
-	b.WriteString(" " + accent.Render("Required setup:") + "\n")
-	for _, line := range []string{
-		"1. Google Cloud Console → create a project + enable",
-		"   YouTube Data API v3 + create OAuth Desktop app.",
-		"2. Spotify Developer Dashboard → reuse your existing app",
-		"   (the one already configured for playback) and grab its",
-		"   Client Secret.",
-		"3. Add to ~/.config/musicTUI/config.toml under [import]:",
-		"     google_client_id     = \"...\"",
-		"     google_client_secret = \"...\"",
-		"     spotify_client_secret = \"...\"",
-		"4. Restart musicTUI.",
-	} {
-		b.WriteString(" " + muted.Render(line) + "\n")
-	}
-	b.WriteString("\n " + muted.Render("Full step-by-step: github.com/iamteedoh/musictui-import#one-time-oauth-setup-per-user"))
+	b.WriteString(" " + body.Render("Press Enter to launch a step-by-step setup wizard. It takes about 10 minutes and walks you through every click."))
+	b.WriteString("\n\n")
+	b.WriteString(" " + muted.Render("You can press Esc to cancel the wizard at any point — partial progress is preserved."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
+		{"Enter", "start setup wizard"},
 		{"Esc", "back"},
 	}))
 	return b.String()

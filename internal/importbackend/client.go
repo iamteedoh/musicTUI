@@ -85,7 +85,7 @@ func (c *Client) AuthYouTube(ctx context.Context) error {
 	if c.google.ClientID == "" || c.google.ClientSecret == "" {
 		return errors.New("Google OAuth credentials not configured — re-run onboarding")
 	}
-	lb, err := oauth.Listen("")
+	lb, err := oauth.Listen(oauth.GoogleLoopbackPort, "")
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func (c *Client) AuthSpotify(ctx context.Context) error {
 	if c.spotify.ClientID == "" || c.spotify.ClientSecret == "" {
 		return errors.New("Spotify OAuth credentials not configured — re-run onboarding")
 	}
-	lb, err := oauth.Listen("")
+	lb, err := oauth.Listen(oauth.SpotifyLoopbackPort, "")
 	if err != nil {
 		return err
 	}
