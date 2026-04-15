@@ -12,57 +12,70 @@ import (
 // OAuth credential setup the embedded import feature needs. It
 // walks the user through:
 //
-//  1. Welcome / overview
-//  2. Google Cloud — create project
-//  3. Google Cloud — enable YouTube Data API v3
-//  4. Google Cloud — OAuth consent screen + add yourself as test user
-//  5. Google Cloud — create OAuth Desktop client
-//  6. Paste Google client_id + client_secret
-//  7. Spotify — add the import redirect URI to your existing app
-//  8. Paste Spotify client_secret
+//  0. Welcome / overview
+//  1. Google Cloud — create project
+//  2. Google Cloud — enable YouTube Data API v3
+//  3. Google Cloud — OAuth consent screen + add yourself as test user
+//  4. Google Cloud — create OAuth Web client
+//  5. Paste Google client_id + client_secret
+//  6. Spotify — choose: reuse playback app OR dedicated import app
+//  7. Spotify — verify/create (copy adapts to the choice above)
+//  8. Paste Spotify creds (client_secret only if reuse;
+//     client_id + client_secret if dedicated)
 //  9. Done
 //
-// Mirrors the existing Onboard component's structure but with two
-// text-input steps (each collecting two adjacent fields) instead
-// of one. Active=true means the wizard takes over the entire
-// screen and input.
+// Mirrors the existing Onboard component's structure but with multi-
+// field text-input steps. Active=true means the wizard takes over
+// the entire screen and input.
 type ImportSetup struct {
 	Active bool
 	Step   int
 	Error  string
 
-	// Step 6 fields
+	// Step 5 — Google creds
 	GoogleClientID     string
 	GoogleClientSecret string
 
-	// Step 8 field
+	// Step 6 — Spotify app choice. SpotifyUseDedicated = true means
+	// the user wants a separate Spotify dev app for imports (separate
+	// rate-limit bucket from playback, recommended for heavy use).
+	SpotifyUseDedicated bool
+	SpotifyChoiceIdx    int // 0 = reuse playback app, 1 = dedicated
+
+	// Step 8 — Spotify creds. ClientID only populated on the
+	// dedicated path; empty means "reuse playback app".
+	SpotifyClientID     string
 	SpotifyClientSecret string
 
 	// Which of the two fields the cursor is on (0 = top, 1 = bottom).
-	// Used by steps 6 (two fields) and 8 (one field — Field always 0).
 	Field int
 	// CursorPos is a RUNE index into the active field. Rune units (not
 	// bytes) so the cursor math stays correct when pasted content
-	// contains multi-byte UTF-8, and so the mask rendering (which
-	// substitutes one `•` per rune) aligns with the cursor.
+	// contains multi-byte UTF-8.
 	CursorPos int
 }
 
-const ImportSetupTotalSteps = 9
+const ImportSetupTotalSteps = 10
 
 // NewImportSetup returns an inactive wizard. Call Start() to launch.
 func NewImportSetup() ImportSetup { return ImportSetup{} }
 
 // Start (re)initializes the wizard state, optionally pre-filled
 // from existing config so the user can edit a partially-completed
-// setup without retyping.
-func (w *ImportSetup) Start(googleID, googleSecret, spotifySecret string) {
+// setup without retyping. spotifyID is the dedicated-app client_id
+// from ImportConfig (empty means reuse).
+func (w *ImportSetup) Start(googleID, googleSecret, spotifyID, spotifySecret string) {
 	*w = ImportSetup{
 		Active:              true,
 		Step:                0,
 		GoogleClientID:      googleID,
 		GoogleClientSecret:  googleSecret,
+		SpotifyClientID:     spotifyID,
 		SpotifyClientSecret: spotifySecret,
+		SpotifyUseDedicated: spotifyID != "",
+	}
+	if w.SpotifyUseDedicated {
+		w.SpotifyChoiceIdx = 1
 	}
 }
 
@@ -87,8 +100,11 @@ func (w *ImportSetup) Prev() {
 // IsInputStep returns true on the steps that take typed input
 // rather than just navigation.
 func (w ImportSetup) IsInputStep() bool {
-	return w.Step == 5 || w.Step == 7
+	return w.Step == 5 || w.Step == 8
 }
+
+// IsChoiceStep returns true on the Spotify app-choice step (6).
+func (w ImportSetup) IsChoiceStep() bool { return w.Step == 6 }
 
 // IsFinalStep returns true on the very last (Done) screen.
 func (w ImportSetup) IsFinalStep() bool {
@@ -104,7 +120,13 @@ func (w *ImportSetup) activeField() *string {
 			return &w.GoogleClientID
 		}
 		return &w.GoogleClientSecret
-	case 7:
+	case 8:
+		if w.SpotifyUseDedicated {
+			if w.Field == 0 {
+				return &w.SpotifyClientID
+			}
+			return &w.SpotifyClientSecret
+		}
 		return &w.SpotifyClientSecret
 	}
 	return nil
@@ -116,10 +138,26 @@ func (w ImportSetup) FieldsOnCurrentStep() int {
 	switch w.Step {
 	case 5:
 		return 2
-	case 7:
+	case 8:
+		if w.SpotifyUseDedicated {
+			return 2
+		}
 		return 1
 	}
 	return 0
+}
+
+// CycleChoice moves the Spotify-app selection (step 6) up or down.
+// `delta` is +1 for j/down, -1 for k/up.
+func (w *ImportSetup) CycleChoice(delta int) {
+	if !w.IsChoiceStep() {
+		return
+	}
+	w.SpotifyChoiceIdx = (w.SpotifyChoiceIdx + delta + 2) % 2
+	w.SpotifyUseDedicated = w.SpotifyChoiceIdx == 1
+	if !w.SpotifyUseDedicated {
+		w.SpotifyClientID = "" // clear if user flipped back
+	}
 }
 
 // SwitchField cycles the cursor between fields on multi-field steps.
@@ -189,17 +227,31 @@ func (w *ImportSetup) Paste(s string) {
 	}
 }
 
-// Trimmed returns the non-whitespace credential values.
-func (w ImportSetup) Trimmed() (gID, gSecret, sSecret string) {
-	return strings.TrimSpace(w.GoogleClientID),
-		strings.TrimSpace(w.GoogleClientSecret),
-		strings.TrimSpace(w.SpotifyClientSecret)
+// Trimmed returns the non-whitespace credential values. sClientID is
+// empty when the user picked "reuse playback app" — the caller
+// resolves it to the playback client_id at save time.
+func (w ImportSetup) Trimmed() (gID, gSecret, sClientID, sSecret string) {
+	gID = strings.TrimSpace(w.GoogleClientID)
+	gSecret = strings.TrimSpace(w.GoogleClientSecret)
+	sSecret = strings.TrimSpace(w.SpotifyClientSecret)
+	if w.SpotifyUseDedicated {
+		sClientID = strings.TrimSpace(w.SpotifyClientID)
+	}
+	return
 }
 
-// Complete reports whether all three credential fields are non-empty.
+// Complete reports whether all required credential fields are non-
+// empty. On the reuse path, Spotify client_id isn't required (falls
+// back to playback client_id). On the dedicated path, it is.
 func (w ImportSetup) Complete() bool {
-	g, gs, ss := w.Trimmed()
-	return g != "" && gs != "" && ss != ""
+	g, gs, sID, sSecret := w.Trimmed()
+	if g == "" || gs == "" || sSecret == "" {
+		return false
+	}
+	if w.SpotifyUseDedicated && sID == "" {
+		return false
+	}
+	return true
 }
 
 // URLForStep returns the recommended URL for the current step's
@@ -214,7 +266,7 @@ func (w ImportSetup) URLForStep() string {
 		return "https://console.cloud.google.com/auth/branding"
 	case 4:
 		return "https://console.cloud.google.com/apis/credentials"
-	case 6:
+	case 7:
 		return "https://developer.spotify.com/dashboard"
 	}
 	return ""
@@ -241,10 +293,12 @@ func (w ImportSetup) View(th theme.Theme, width, height int) string {
 	case 5:
 		body = w.viewGooglePasteCreds(th)
 	case 6:
-		body = w.viewSpotifyRedirect(th)
+		body = w.viewSpotifyChoice(th)
 	case 7:
-		body = w.viewSpotifyPasteSecret(th)
+		body = w.viewSpotifyApp(th)
 	case 8:
+		body = w.viewSpotifyPasteCreds(th)
+	case 9:
 		body = w.viewDone(th)
 	}
 
@@ -294,14 +348,18 @@ func (w ImportSetup) footer(th theme.Theme) string {
 	if w.Step > 0 {
 		hints = append(hints, key.Render("←")+dim.Render(": back"))
 	}
-	if w.IsInputStep() {
+	switch {
+	case w.IsChoiceStep():
+		hints = append(hints, key.Render("j/k")+dim.Render(": pick"))
+		hints = append(hints, key.Render("Enter")+dim.Render(": confirm"))
+	case w.IsInputStep():
 		if w.FieldsOnCurrentStep() > 1 {
 			hints = append(hints, key.Render("Tab")+dim.Render(": switch field"))
 		}
 		hints = append(hints, key.Render("Enter")+dim.Render(": next"))
-	} else if w.IsFinalStep() {
+	case w.IsFinalStep():
 		hints = append(hints, key.Render("Enter")+dim.Render(": save & finish"))
-	} else {
+	default:
 		hints = append(hints, key.Render("→ / Enter")+dim.Render(": next"))
 	}
 	if w.URLForStep() != "" {
@@ -444,37 +502,109 @@ func (w ImportSetup) viewGooglePasteCreds(th theme.Theme) string {
 	return b.String()
 }
 
-func (w ImportSetup) viewSpotifyRedirect(th theme.Theme) string {
+func (w ImportSetup) viewSpotifyChoice(th theme.Theme) string {
+	body := lipgloss.NewStyle().Foreground(th.Fg).Width(64)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(60)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
+
+	selected := lipgloss.NewStyle().
+		Foreground(th.Surface).
+		Background(th.Accent).
+		Bold(true).
+		Padding(0, 1)
+	unselected := lipgloss.NewStyle().Foreground(th.Fg).Padding(0, 1)
+
+	var b strings.Builder
+	b.WriteString(accent.Render("Spotify — Choose Your App Strategy") + "\n")
+	b.WriteString(body.Render("Spotify rate-limits API traffic per app. Bulk imports can burn through a lot of requests and temporarily throttle everything else against the same app — including playback."))
+	b.WriteString("\n\n")
+	b.WriteString(accent.Render("Your options:") + "\n\n")
+
+	opts := []struct {
+		title, hint string
+	}{
+		{"Reuse your existing playback app", "Simpler setup. Heavy imports can briefly throttle playback."},
+		{"Create a dedicated import app", "One-time extra setup (~3 min). Separate rate-limit bucket means imports never affect playback."},
+	}
+	for i, o := range opts {
+		style := unselected
+		marker := "  "
+		if i == w.SpotifyChoiceIdx {
+			style = selected
+			marker = "▸ "
+		}
+		b.WriteString(" " + marker + style.Render(o.title) + "\n")
+		b.WriteString("    " + muted.Render(o.hint) + "\n\n")
+	}
+	b.WriteString(warn.Render("💡 If you've been hitting rate limits on imports,"))
+	b.WriteString("\n" + warn.Render("   pick \"dedicated import app\" — that's almost"))
+	b.WriteString("\n" + warn.Render("   certainly the root cause."))
+	return b.String()
+}
+
+func (w ImportSetup) viewSpotifyApp(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(64)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(64)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	good := lipgloss.NewStyle().Foreground(th.Success)
+
+	if w.SpotifyUseDedicated {
+		var b strings.Builder
+		b.WriteString(accent.Render("Spotify — Create Dedicated Import App") + "\n")
+		b.WriteString(body.Render("This app will only be used for library imports. Your existing playback app stays untouched."))
+		b.WriteString("\n\n")
+		b.WriteString(muted.Render("Press O to open:"))
+		b.WriteString("\n  " + accent.Render(w.URLForStep()))
+		b.WriteString("\n\n")
+		b.WriteString(body.Render("On the dashboard, click Create app and fill in:"))
+		b.WriteString("\n  • " + body.Render("App name: musicTUI Import"))
+		b.WriteString("\n  • " + body.Render("Description: Library import tool"))
+		b.WriteString("\n  • " + body.Render("Redirect URI:"))
+		b.WriteString("\n      " + accent.Render("http://127.0.0.1:8888/callback"))
+		b.WriteString("\n  • " + body.Render("Which APIs: ☑ Web API"))
+		b.WriteString("\n\n")
+		b.WriteString(body.Render("After Save: go to the app's Settings → User Management and add your own Spotify account. Then copy the Client ID + Client Secret for the next step."))
+		return b.String()
+	}
+
+	// Reuse path
 	var b strings.Builder
 	b.WriteString(accent.Render("Spotify — Verify Your Existing App") + "\n")
-	b.WriteString(body.Render("You already created a Spotify Developer app during the first-run playback setup. Import reuses that same app — no need to create a second one."))
+	b.WriteString(body.Render("Using the same Spotify app you set up for playback. Confirm two things:"))
 	b.WriteString("\n\n")
 	b.WriteString(muted.Render("Press O to open:"))
 	b.WriteString("\n  " + accent.Render(w.URLForStep()))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Click your existing musicTUI app → Settings → Edit. Two things to confirm:"))
+	b.WriteString(body.Render("Click your musicTUI app → Settings → Edit:"))
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("  1. Redirect URIs includes:"))
 	b.WriteString("\n     " + good.Render("✓ http://127.0.0.1:8888/callback"))
-	b.WriteString("\n     " + muted.Render("(This is the same port playback uses, so it"))
-	b.WriteString("\n     " + muted.Render(" should already be there.)"))
+	b.WriteString("\n     " + muted.Render("(same port playback uses — likely already there)"))
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("  2. Under User Management, your Spotify account is"))
-	b.WriteString("\n     " + body.Render("listed as a user — required for playlist creation."))
+	b.WriteString("\n     " + body.Render("listed — required for playlist creation."))
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("If anything's missing, add it and click Save."))
 	return b.String()
 }
 
-func (w ImportSetup) viewSpotifyPasteSecret(th theme.Theme) string {
+func (w ImportSetup) viewSpotifyPasteCreds(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(64)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(64)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	var b strings.Builder
+	if w.SpotifyUseDedicated {
+		b.WriteString(accent.Render("Paste Spotify OAuth Credentials") + "\n")
+		b.WriteString(body.Render("From your newly-created Spotify import app's dashboard page, copy the Client ID and Client Secret."))
+		b.WriteString("\n\n")
+		b.WriteString(w.renderField("Client ID", w.SpotifyClientID, w.Field == 0, false, th))
+		b.WriteString("\n")
+		b.WriteString(w.renderField("Client Secret", w.SpotifyClientSecret, w.Field == 1, true, th))
+		b.WriteString("\n")
+		b.WriteString(muted.Render("Tab to switch fields. Enter to continue."))
+		return b.String()
+	}
 	b.WriteString(accent.Render("Paste Spotify Client Secret") + "\n")
 	b.WriteString(body.Render("Your Spotify Client ID is already configured (from playback setup). The import flow needs the Client Secret too."))
 	b.WriteString("\n\n")

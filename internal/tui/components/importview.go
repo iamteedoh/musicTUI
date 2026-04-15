@@ -188,9 +188,10 @@ func (i Import) viewIdle(th theme.Theme, w int) string {
 	} {
 		b.WriteString(" " + muted.Render(line) + "\n")
 	}
-	b.WriteString("\n " + muted.Render("Runs on the musictui-import service. Self-hosters can point at their own backend via [import_backend] in config.toml."))
+	b.WriteString("\n " + muted.Render("Runs entirely on your machine — no hosted backend. Tokens are stored locally under the musicTUI config dir."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
 		{"Enter", "begin"},
+		{"c", "reconfigure"},
 		{"Esc", "back"},
 	}))
 	return b.String()

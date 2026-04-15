@@ -16,15 +16,27 @@ type SpotifyConfig struct {
 // runs OAuth loopback flows against Google Cloud and Spotify using
 // these creds directly.
 //
-// Spotify: reuse the same client_id from SpotifyConfig above. The
-// ClientSecret field here is needed because plain Authorization
-// Code exchange requires it. Playback uses PKCE and doesn't need
-// the secret — but we ask for it here so import can work.
+// SpotifyClientID is optional: if empty, we reuse SpotifyConfig.ClientID
+// (the playback app). Setting it means the user created a dedicated
+// Spotify dev app for imports — recommended for heavy use because
+// Spotify rate-limits per app, and a burst of imports can otherwise
+// throttle playback for hours. The wizard walks users through the
+// trade-off.
 type ImportConfig struct {
-	GoogleClientID     string `toml:"google_client_id"`
-	GoogleClientSecret string `toml:"google_client_secret"`
-	// Spotify import-side client secret. Same app as SpotifyConfig.ClientID.
+	GoogleClientID      string `toml:"google_client_id"`
+	GoogleClientSecret  string `toml:"google_client_secret"`
+	SpotifyClientID     string `toml:"spotify_client_id,omitempty"`
 	SpotifyClientSecret string `toml:"spotify_client_secret"`
+}
+
+// SpotifyImportClientID returns the effective client_id to use for
+// the import flow: the dedicated one from ImportConfig if set,
+// otherwise the playback app's.
+func (c Config) SpotifyImportClientID() string {
+	if c.Import.SpotifyClientID != "" {
+		return c.Import.SpotifyClientID
+	}
+	return c.Spotify.ClientID
 }
 
 type Config struct {

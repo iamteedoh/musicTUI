@@ -136,9 +136,10 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	if importDir != "" {
 		importDir += "/import"
 	}
+	spotifyID := cfg.SpotifyImportClientID()
 	importReady := cfg.Import.GoogleClientID != "" &&
 		cfg.Import.GoogleClientSecret != "" &&
-		cfg.Spotify.ClientID != "" &&
+		spotifyID != "" &&
 		cfg.Import.SpotifyClientSecret != ""
 	if importReady {
 		importClient, err := importbackend.NewClient(
@@ -148,7 +149,7 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 				ClientSecret: cfg.Import.GoogleClientSecret,
 			},
 			oauth.SpotifyConfig{
-				ClientID:     cfg.Spotify.ClientID,
+				ClientID:     spotifyID,
 				ClientSecret: cfg.Import.SpotifyClientSecret,
 			},
 		)
@@ -1212,35 +1213,64 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Final "Done" step: Enter saves + closes.
 	if a.importsetup.IsFinalStep() && s == "enter" {
-		gID, gSecret, sSecret := a.importsetup.Trimmed()
+		gID, gSecret, sClientID, sSecret := a.importsetup.Trimmed()
 		if !a.importsetup.Complete() {
-			a.importsetup.Error = "All three fields are required — go back and fill them in."
+			a.importsetup.Error = "All required fields must be filled — go back and fill them in."
 			return a, nil
 		}
+		// Detect app-switch so we can invalidate the stored Spotify
+		// token (tied to the old client_id, useless once the app
+		// changes). Comparing effective client_ids: what we were
+		// using vs what we will now use.
+		oldSpotifyID := a.config.SpotifyImportClientID()
 		a.config.Import.GoogleClientID = gID
 		a.config.Import.GoogleClientSecret = gSecret
+		a.config.Import.SpotifyClientID = sClientID // empty when reusing playback app
 		a.config.Import.SpotifyClientSecret = sSecret
+		newSpotifyID := a.config.SpotifyImportClientID()
+
 		if err := config.Save(a.config); err != nil {
 			a.importsetup.Error = "Failed to save config: " + err.Error()
 			return a, nil
 		}
-		// Build the importbackend client now that creds are present.
 		dir, _ := config.ConfigDir()
 		if dir != "" {
 			dir += "/import"
 		}
+		// If the Spotify app changed, drop the old token file so
+		// AuthSpotify re-runs against the new app next time.
+		if oldSpotifyID != newSpotifyID {
+			_ = os.Remove(filepath.Join(dir, "spotify.json"))
+		}
 		client, err := importbackend.NewClient(
 			dir,
 			oauth.GoogleConfig{ClientID: gID, ClientSecret: gSecret},
-			oauth.SpotifyConfig{ClientID: a.config.Spotify.ClientID, ClientSecret: sSecret},
+			oauth.SpotifyConfig{ClientID: newSpotifyID, ClientSecret: sSecret},
 		)
 		if err != nil {
 			a.importsetup.Error = "Couldn't initialise import client: " + err.Error()
 			return a, nil
 		}
 		a.importClient = client
-		a.importv = components.NewImport() // resets to Idle; clears NotConfigured
+		a.importv = components.NewImport()
 		a.importsetup.Close()
+		return a, nil
+	}
+
+	// Choice step (Spotify app strategy): j/k to move, Enter to confirm.
+	if a.importsetup.IsChoiceStep() {
+		switch s {
+		case "j", "down":
+			a.importsetup.CycleChoice(+1)
+			return a, nil
+		case "k", "up":
+			a.importsetup.CycleChoice(-1)
+			return a, nil
+		case "enter", "right", "l":
+			a.importsetup.Error = ""
+			a.importsetup.Next()
+			return a, nil
+		}
 		return a, nil
 	}
 
@@ -1253,13 +1283,18 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			// Validate this step's fields before advancing.
 			if a.importsetup.Step == 5 {
-				if g, gs, _ := a.importsetup.Trimmed(); g == "" || gs == "" {
+				if g, gs, _, _ := a.importsetup.Trimmed(); g == "" || gs == "" {
 					a.importsetup.Error = "Both Client ID and Client Secret are required."
 					return a, nil
 				}
-			} else if a.importsetup.Step == 7 {
-				if _, _, ss := a.importsetup.Trimmed(); ss == "" {
+			} else if a.importsetup.Step == 8 {
+				_, _, sID, ss := a.importsetup.Trimmed()
+				if ss == "" {
 					a.importsetup.Error = "Spotify Client Secret is required."
+					return a, nil
+				}
+				if a.importsetup.SpotifyUseDedicated && sID == "" {
+					a.importsetup.Error = "Spotify Client ID is required for the dedicated app."
 					return a, nil
 				}
 			}
@@ -1271,7 +1306,6 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		default:
 			if len(msg.Runes) > 1 {
-				// Likely a paste — bulk insert.
 				a.importsetup.Paste(string(msg.Runes))
 				return a, nil
 			}
@@ -1286,7 +1320,7 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Non-input, non-final steps: navigation + browser-open.
+	// Non-input, non-choice, non-final steps: navigation + browser-open.
 	switch s {
 	case "enter", "right", "l":
 		a.importsetup.Error = ""
@@ -1599,6 +1633,17 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// is important because handleKey special-routes ViewImport
 			// to handleContentKey even when focus is on the sidebar.
 			return a.handleNavKey(msg)
+		case "c":
+			// Re-open the setup wizard. Useful for switching Spotify
+			// strategy (shared → dedicated) after hitting rate limits,
+			// or re-pasting a rotated client secret.
+			a.importsetup.Start(
+				a.config.Import.GoogleClientID,
+				a.config.Import.GoogleClientSecret,
+				a.config.Import.SpotifyClientID,
+				a.config.Import.SpotifyClientSecret,
+			)
+			return a, nil
 		}
 	case model.ViewHelp:
 		switch msg.String() {
@@ -1843,6 +1888,7 @@ func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
 		a.importsetup.Start(
 			a.config.Import.GoogleClientID,
 			a.config.Import.GoogleClientSecret,
+			a.config.Import.SpotifyClientID,
 			a.config.Import.SpotifyClientSecret,
 		)
 		return a, nil
