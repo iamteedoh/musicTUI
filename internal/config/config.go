@@ -11,22 +11,30 @@ type SpotifyConfig struct {
 	ClientID string `toml:"client_id"`
 }
 
-// ImportBackendConfig points at a musictui-import deployment. The
-// default empty URL falls back to the public hosted instance —
-// self-hosters set their own URL here to keep their tokens on their
-// own infrastructure.
-type ImportBackendConfig struct {
-	URL string `toml:"url"`
+// ImportConfig holds user-supplied OAuth client credentials for the
+// embedded library-import feature. No hosted service — the binary
+// runs OAuth loopback flows against Google Cloud and Spotify using
+// these creds directly.
+//
+// Spotify: reuse the same client_id from SpotifyConfig above. The
+// ClientSecret field here is needed because plain Authorization
+// Code exchange requires it. Playback uses PKCE and doesn't need
+// the secret — but we ask for it here so import can work.
+type ImportConfig struct {
+	GoogleClientID     string `toml:"google_client_id"`
+	GoogleClientSecret string `toml:"google_client_secret"`
+	// Spotify import-side client secret. Same app as SpotifyConfig.ClientID.
+	SpotifyClientSecret string `toml:"spotify_client_secret"`
 }
 
 type Config struct {
-	Theme           string              `toml:"theme"`
-	TickRateMs      int                 `toml:"tick_rate_ms"`
-	FrameRate       int                 `toml:"frame_rate"`
-	Volume          int                 `toml:"volume"`
-	CheckDuplicates bool                `toml:"check_duplicates"`
-	Spotify         SpotifyConfig       `toml:"spotify"`
-	ImportBackend   ImportBackendConfig `toml:"import_backend"`
+	Theme           string        `toml:"theme"`
+	TickRateMs      int           `toml:"tick_rate_ms"`
+	FrameRate       int           `toml:"frame_rate"`
+	Volume          int           `toml:"volume"`
+	CheckDuplicates bool          `toml:"check_duplicates"`
+	Spotify         SpotifyConfig `toml:"spotify"`
+	Import          ImportConfig  `toml:"import"`
 }
 
 func Default() Config {

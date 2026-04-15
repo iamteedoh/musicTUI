@@ -13,6 +13,7 @@ import (
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musictui-import/importer"
 )
 
 // Navigation
@@ -271,127 +272,115 @@ func ApplyUpdateCmd(rel *update.Release) tea.Cmd {
 	}
 }
 
-// ═════════ Import-backend messages (v0.2.0) ═════════
+// ═════════ Import messages (v0.3.0 — embedded) ═════════
 
-// SessionReadyMsg lands when the CLI either restored a cached session
-// or minted a fresh one against the import backend.
-type SessionReadyMsg struct {
-	Session *importbackend.Session
+// ServicesStatusMsg reports which services have local tokens.
+type ServicesStatusMsg struct {
+	Status importbackend.ServicesStatus
 }
-type SessionErrorMsg struct{ Err error }
+type ServicesStatusErrorMsg struct{ Err error }
 
-// SessionStateMsg is emitted by the polling loop once per tick — the
-// view inspects the Services map to decide whether it can move on
-// from "awaiting auth".
-type SessionStateMsg struct {
-	State *importbackend.SessionState
+// ServiceAuthedMsg lands when a single service OAuth flow completed.
+// Followed-up by another ServicesStatusCmd to re-check state.
+type ServiceAuthedMsg struct {
+	Service string // "youtube" | "spotify"
+}
+type ServiceAuthErrorMsg struct {
+	Service string
+	Err     error
 }
 
-// LibraryLoadedFromBackendMsg lands after GET /library/youtube.
-type LibraryLoadedFromBackendMsg struct {
+// ImportLibraryLoadedMsg / ImportLibraryErrorMsg after calling
+// Client.LoadLibrary. Named with the "Import" prefix to avoid
+// collision with the Spotify-library messages further up.
+type ImportLibraryLoadedMsg struct {
 	Library *importbackend.YouTubeLibrary
 }
-type LibraryErrorFromBackendMsg struct{ Err error }
+type ImportLibraryErrorMsg struct{ Err error }
 
-// ImportStartedMsg lands when POST /import returned a job_id.
-type ImportStartedMsg struct {
-	JobID string
-}
-type ImportStartErrorMsg struct{ Err error }
-
-// ImportEventMsg is one decoded SSE frame — emitted repeatedly until
-// a terminal event closes the stream.
+// ImportEventMsg carries one event from the importer channel.
+// Re-arm ListenImportEventCmd until a terminal event arrives.
 type ImportEventMsg struct {
-	Event importbackend.Event
+	Event importer.Event
 }
 type ImportStreamClosedMsg struct{}
 
-// EnsureBackendSessionCmd reads the cached session file. If a valid
-// session exists it returns SessionReadyMsg. Otherwise it mints a new
-// one via POST /api/session and persists it.
-func EnsureBackendSessionCmd(client *importbackend.Client) tea.Cmd {
+// CheckServicesCmd reads the local token store and reports which
+// services have tokens. Cheap — no network.
+func CheckServicesCmd(client *importbackend.Client) tea.Cmd {
 	return func() tea.Msg {
-		// Try cached first.
-		if cached, err := importbackend.LoadSession(); err == nil && cached != nil {
-			// Validate it still works on the backend. If the session was
-			// purged server-side we'll silently fall through to creating
-			// a fresh one.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := client.GetSessionState(ctx, cached.SessionID); err == nil {
-				return SessionReadyMsg{Session: cached}
-			}
-			// Backend forgot us — clear the stale file before re-creating.
-			_ = importbackend.ClearSession()
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		sess, err := client.CreateSession(ctx)
+		st, err := client.Services()
 		if err != nil {
-			return SessionErrorMsg{Err: err}
+			return ServicesStatusErrorMsg{Err: err}
 		}
-		_ = importbackend.SaveSession(sess)
-		return SessionReadyMsg{Session: sess}
+		return ServicesStatusMsg{Status: st}
 	}
 }
 
-// PollSessionStateCmd waits ~2 seconds then fetches the session state
-// once. The view re-issues this command in a loop while it's waiting
-// for OAuth to complete; bounding to a single fetch keeps the BubbleTea
-// command surface simple and avoids long-lived goroutines that would
-// outlive a view change.
-func PollSessionStateCmd(client *importbackend.Client, sessionID string) tea.Cmd {
+// AuthServiceCmd opens the browser, runs the local OAuth loopback
+// flow for `service`, and persists the resulting token. Blocks
+// until the browser redirects back or ctx times out (~10 min).
+func AuthServiceCmd(client *importbackend.Client, service string) tea.Cmd {
 	return func() tea.Msg {
-		time.Sleep(2 * time.Second)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		state, err := client.GetSessionState(ctx, sessionID)
-		if err != nil {
-			return SessionErrorMsg{Err: err}
+		var err error
+		switch service {
+		case "youtube":
+			err = client.AuthYouTube(ctx)
+		case "spotify":
+			err = client.AuthSpotify(ctx)
+		default:
+			err = fmt.Errorf("unknown service %q", service)
 		}
-		return SessionStateMsg{State: state}
+		if err != nil {
+			return ServiceAuthErrorMsg{Service: service, Err: err}
+		}
+		return ServiceAuthedMsg{Service: service}
 	}
 }
 
-// LoadLibraryFromBackendCmd hits GET /library/youtube.
-func LoadLibraryFromBackendCmd(client *importbackend.Client, sessionID string) tea.Cmd {
+// LoadLibraryCmd calls Client.LoadLibrary. Does a live YT Data API
+// roundtrip; may take a few seconds for libraries with many
+// playlists.
+func LoadLibraryCmd(client *importbackend.Client) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		lib, err := client.LoadYouTubeLibrary(ctx, sessionID)
+		lib, err := client.LoadLibrary(ctx)
 		if err != nil {
-			return LibraryErrorFromBackendMsg{Err: err}
+			return ImportLibraryErrorMsg{Err: err}
 		}
-		return LibraryLoadedFromBackendMsg{Library: lib}
+		return ImportLibraryLoadedMsg{Library: lib}
 	}
 }
 
-// StartImportCmd kicks the backend job. Currently always full library
-// (all playlists + liked); per-playlist selection is Phase E.
-func StartImportCmd(
-	client *importbackend.Client, sessionID, csrfToken string, includeLiked bool,
-) tea.Cmd {
+// StartImportMsg carries the event channel from Client.StartImport
+// back to app.go so it can be stored for ListenImportEventCmd.
+type StartImportMsg struct {
+	Events <-chan importer.Event
+	Cancel context.CancelFunc
+}
+
+// StartImportCmd kicks the importer in a goroutine. Returns
+// StartImportMsg immediately — the import itself runs to completion
+// in the background, driven by ListenImportEventCmd re-arms.
+func StartImportCmd(client *importbackend.Client, includeLiked bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		jobID, err := client.StartImport(ctx, sessionID, csrfToken, importbackend.ImportRequest{
+		ctx, cancel := context.WithCancel(context.Background())
+		events := client.StartImport(ctx, importbackend.ImportRequest{
 			Source:       "youtube",
 			Dest:         "spotify",
 			IncludeLiked: includeLiked,
 		})
-		if err != nil {
-			return ImportStartErrorMsg{Err: err}
-		}
-		return ImportStartedMsg{JobID: jobID}
+		return StartImportMsg{Events: events, Cancel: cancel}
 	}
 }
 
-// ListenImportEventCmd reads ONE event from the SSE channel and
-// returns it as a message. The app re-issues the command after each
-// event lands to keep pumping the stream into the BubbleTea event
-// loop. The stream context is owned by the caller; cancelling it
-// causes the next read to return ImportStreamClosedMsg.
-func ListenImportEventCmd(events <-chan importbackend.Event) tea.Cmd {
+// ListenImportEventCmd reads one event from the channel. The app's
+// message handler re-issues the Cmd after each event until a
+// terminal event (job_done / error) arrives.
+func ListenImportEventCmd(events <-chan importer.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-events
 		if !ok {

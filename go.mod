@@ -1,12 +1,19 @@
 module github.com/iamteedoh/musicTUI
 
-go 1.25.8
+go 1.26.2
+
+// Local dev replace while the shared module is unreleased. Before
+// tagging v0.3.0 this is replaced with a proper `require
+// github.com/iamteedoh/musictui-import vX.Y.Z`.
+replace github.com/iamteedoh/musictui-import => ../musictui-import
 
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/iamteedoh/musictui-import v0.0.0-00010101000000-000000000000
+	github.com/madelynnblue/go-dsp v1.0.0
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.36.0
 )

@@ -10,13 +10,16 @@ import (
 )
 
 // ImportStage is the high-level state of the Import screen. The app
-// transitions stages as backend RPCs and SSE events land.
+// transitions stages as RPCs land and the local importer emits events.
 type ImportStage int
 
 const (
-	// ImportStageIdle: nothing started yet — show the "Import from
-	// YouTube Music" intro and an Enter-to-begin prompt.
-	ImportStageIdle ImportStage = iota
+	// ImportStageNotConfigured: user hasn't set up OAuth client creds
+	// yet (Import.GoogleClientID is empty). Show config instructions
+	// instead of the normal flow.
+	ImportStageNotConfigured ImportStage = iota
+	// ImportStageIdle: ready to start — show the intro + Enter prompt.
+	ImportStageIdle
 	// ImportStageEnsuringSession: hitting POST /api/session on first
 	// run, or validating a cached session_id on relaunch.
 	ImportStageEnsuringSession
@@ -44,17 +47,15 @@ type Import struct {
 	Stage ImportStage
 
 	// Auth phase
-	BackendURL          string
-	YouTubeConnected    bool
-	SpotifyConnected    bool
-	AuthBrowserOpenedFor string // "youtube" | "spotify" | "" — last service we opened for
+	YouTubeConnected     bool
+	SpotifyConnected     bool
+	AuthBrowserOpenedFor string // "youtube" | "spotify" | "" — last service we triggered for
 
 	// Library phase
 	Playlists  []importbackend.PlaylistSummary
 	LikedCount int
 
-	// Import phase (streamed via SSE)
-	JobID                   string
+	// Import phase (streamed via the importer event channel)
 	ProgressCurrentPlaylist string
 	ProgressDone            int
 	ProgressTotal           int
@@ -74,16 +75,17 @@ func NewImport() Import {
 	return Import{Stage: ImportStageIdle}
 }
 
+// MarkNotConfigured is called by the app at startup if the user
+// hasn't supplied OAuth credentials yet. Switches the view to the
+// "setup required" stage instead of the normal Idle.
+func (i *Import) MarkNotConfigured() {
+	i.Stage = ImportStageNotConfigured
+}
+
 // Reset clears everything back to the idle state — called when the
 // user presses Enter from a terminal state to run another import, and
 // when they navigate away.
-func (i *Import) Reset() {
-	*i = Import{Stage: ImportStageIdle, BackendURL: i.BackendURL}
-}
-
-// HardReset clears everything including BackendURL — used when the
-// import-backend URL changes from settings.
-func (i *Import) HardReset() { *i = Import{Stage: ImportStageIdle} }
+func (i *Import) Reset() { *i = Import{Stage: ImportStageIdle} }
 
 // BothConnected reports whether the user has finished both OAuth
 // flows for the current import. The view advances to the
@@ -120,6 +122,8 @@ func (i Import) View(th theme.Theme, width, height int) string {
 
 	var body string
 	switch i.Stage {
+	case ImportStageNotConfigured:
+		body = i.viewNotConfigured(th, inner)
 	case ImportStageIdle:
 		body = i.viewIdle(th, inner)
 	case ImportStageEnsuringSession:
@@ -142,6 +146,38 @@ func (i Import) View(th theme.Theme, width, height int) string {
 }
 
 // ─────────────────── per-stage views ───────────────────
+
+func (i Import) viewNotConfigured(th theme.Theme, w int) string {
+	body := lipgloss.NewStyle().Foreground(th.Fg).Width(w)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
+
+	var b strings.Builder
+	b.WriteString(" " + warn.Render("⚠ Import not configured") + "\n\n")
+	b.WriteString(" " + body.Render("The library import feature needs OAuth credentials for Google Cloud (YouTube) and Spotify. Each user creates their own — that way no tokens leave your machine."))
+	b.WriteString("\n\n")
+	b.WriteString(" " + accent.Render("Required setup:") + "\n")
+	for _, line := range []string{
+		"1. Google Cloud Console → create a project + enable",
+		"   YouTube Data API v3 + create OAuth Desktop app.",
+		"2. Spotify Developer Dashboard → reuse your existing app",
+		"   (the one already configured for playback) and grab its",
+		"   Client Secret.",
+		"3. Add to ~/.config/musicTUI/config.toml under [import]:",
+		"     google_client_id     = \"...\"",
+		"     google_client_secret = \"...\"",
+		"     spotify_client_secret = \"...\"",
+		"4. Restart musicTUI.",
+	} {
+		b.WriteString(" " + muted.Render(line) + "\n")
+	}
+	b.WriteString("\n " + muted.Render("Full step-by-step: github.com/iamteedoh/musictui-import#one-time-oauth-setup-per-user"))
+	b.WriteString("\n\n " + RenderHints(th, []Hint{
+		{"Esc", "back"},
+	}))
+	return b.String()
+}
 
 func (i Import) viewIdle(th theme.Theme, w int) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(w)

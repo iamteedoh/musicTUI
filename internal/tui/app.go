@@ -25,6 +25,8 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
+	"github.com/iamteedoh/musictui-import/importer"
+	"github.com/iamteedoh/musictui-import/oauth"
 )
 
 type App struct {
@@ -50,11 +52,10 @@ type App struct {
 	lyrics   components.Lyrics
 	artwork  components.Artwork
 	settings components.Settings
-	importv         components.Import
-	importClient    *importbackend.Client
-	importSession   *importbackend.Session
-	importEvents    <-chan importbackend.Event // active SSE channel; nil when no import is running
-	importEventsCancel context.CancelFunc      // cancels the SSE goroutine on view exit
+	importv            components.Import
+	importClient       *importbackend.Client
+	importEvents       <-chan importer.Event // active import event stream; nil when no import is running
+	importEventsCancel context.CancelFunc    // cancels the importer goroutine on view exit
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
@@ -124,14 +125,35 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		// First launch with no credentials — walk the user through setup.
 		app.onboard.Start()
 	}
-	// Set up the import-backend client. URL falls back to the public
-	// hosted instance if the user hasn't configured a self-hosted one.
-	app.importClient = importbackend.NewClient(cfg.ImportBackend.URL)
-	app.importv.BackendURL = app.importClient.BackendURL()
-	// Hydrate any cached session so a relaunch after a completed
-	// auth skips straight to library read.
-	if sess, err := importbackend.LoadSession(); err == nil && sess != nil {
-		app.importSession = sess
+	// Set up the embedded import client. Runs fully locally against
+	// the user's own Google Cloud + Spotify OAuth apps — no hosted
+	// service. Tokens live under the musicTUI config dir.
+	importDir, _ := config.ConfigDir()
+	if importDir != "" {
+		importDir += "/import"
+	}
+	importReady := cfg.Import.GoogleClientID != "" &&
+		cfg.Import.GoogleClientSecret != "" &&
+		cfg.Spotify.ClientID != "" &&
+		cfg.Import.SpotifyClientSecret != ""
+	if importReady {
+		importClient, err := importbackend.NewClient(
+			importDir,
+			oauth.GoogleConfig{
+				ClientID:     cfg.Import.GoogleClientID,
+				ClientSecret: cfg.Import.GoogleClientSecret,
+			},
+			oauth.SpotifyConfig{
+				ClientID:     cfg.Spotify.ClientID,
+				ClientSecret: cfg.Import.SpotifyClientSecret,
+			},
+		)
+		if err == nil {
+			app.importClient = importClient
+		}
+	}
+	if app.importClient == nil {
+		app.importv.MarkNotConfigured()
 	}
 	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
@@ -374,107 +396,96 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = "Spotify blocked the app: its owner needs Premium — see Home for how to fix"
 		return a, nil
 
-	// Import-backend (v0.2.0)
-	case SessionReadyMsg:
-		a.importSession = msg.Session
-		// Move on to checking which services are connected. If both are
-		// already connected (e.g. user re-ran after a successful auth
-		// in a previous launch), we'll skip straight to library read.
+	// Import (v0.3.0 — embedded, runs locally)
+	case ServicesStatusMsg:
+		a.importv.YouTubeConnected = msg.Status.YouTube
+		a.importv.SpotifyConnected = msg.Status.Spotify
+		if msg.Status.YouTube && msg.Status.Spotify {
+			a.importv.Stage = components.ImportStageLoadingLibrary
+			return a, LoadLibraryCmd(a.importClient)
+		}
+		// Auto-trigger OAuth for the next service that needs it.
+		next := a.importv.NextServiceToConnect()
+		if next != "" && a.importv.AuthBrowserOpenedFor != next {
+			a.importv.AuthBrowserOpenedFor = next
+			a.importv.Stage = components.ImportStageAwaitingAuth
+			return a, AuthServiceCmd(a.importClient, next)
+		}
 		a.importv.Stage = components.ImportStageAwaitingAuth
-		return a, PollSessionStateCmd(a.importClient, msg.Session.SessionID)
-	case SessionErrorMsg:
+		return a, nil
+	case ServicesStatusErrorMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
-	case SessionStateMsg:
-		a.importv.YouTubeConnected = msg.State.Services["youtube"]
-		a.importv.SpotifyConnected = msg.State.Services["spotify"]
-		if a.importv.BothConnected() {
-			a.importv.Stage = components.ImportStageLoadingLibrary
-			return a, LoadLibraryFromBackendCmd(a.importClient, a.importSession.SessionID)
-		}
-		// Auto-open the next service that needs auth if we haven't already.
-		next := a.importv.NextServiceToConnect()
-		if next != "" && a.importv.AuthBrowserOpenedFor != next {
-			openBrowser(a.importClient.AuthStartURL(next, a.importSession.SessionID))
-			a.importv.AuthBrowserOpenedFor = next
-		}
-		// Keep polling.
-		return a, PollSessionStateCmd(a.importClient, a.importSession.SessionID)
-	case LibraryLoadedFromBackendMsg:
+	case ServiceAuthedMsg:
+		// Just landed one OAuth flow — re-check status so the next
+		// service auto-triggers (or library load kicks off).
+		a.importv.AuthBrowserOpenedFor = ""
+		return a, CheckServicesCmd(a.importClient)
+	case ServiceAuthErrorMsg:
+		a.importv.Stage = components.ImportStageError
+		a.importv.Err = fmt.Errorf("%s auth: %w", msg.Service, msg.Err)
+		a.importv.AuthBrowserOpenedFor = ""
+		return a, nil
+	case ImportLibraryLoadedMsg:
 		a.importv.Stage = components.ImportStageLibraryLoaded
 		a.importv.Playlists = msg.Library.Playlists
 		a.importv.LikedCount = msg.Library.LikedCount
 		return a, nil
-	case LibraryErrorFromBackendMsg:
+	case ImportLibraryErrorMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
-	case ImportStartedMsg:
-		a.importv.JobID = msg.JobID
+	case StartImportMsg:
 		a.importv.Stage = components.ImportStageImporting
-		// Spawn the SSE goroutine and start pumping events into the
-		// BubbleTea event loop one at a time.
-		ctx, cancel := context.WithCancel(context.Background())
-		a.importEventsCancel = cancel
-		a.importEvents = a.importClient.ListenEvents(ctx, a.importSession.SessionID, msg.JobID)
-		return a, ListenImportEventCmd(a.importEvents)
-	case ImportStartErrorMsg:
-		a.importv.Stage = components.ImportStageError
-		a.importv.Err = msg.Err
-		return a, nil
+		a.importEvents = msg.Events
+		a.importEventsCancel = msg.Cancel
+		return a, ListenImportEventCmd(msg.Events)
 	case ImportEventMsg:
-		// Apply event to view state. After applying we re-arm the
-		// listener for the next event unless this one terminated the
-		// stream (job_done / error / stream_error).
 		ev := msg.Event
 		switch ev.Type {
-		case "job_started":
+		case importer.EventJobStarted:
 			// nothing user-visible — the importing view is already showing
-		case "playlist_skipped":
-			// Entire playlist was filtered out as non-music. Bump the
-			// overall counter so the denominator stays accurate, but
-			// don't advance "current playlist" display.
+		case importer.EventPlaylistSkipped:
 			a.importv.ProgressOverallTotal++
-		case "playlist_started":
-			a.importv.ProgressCurrentPlaylist = ev.Str("name")
+		case importer.EventPlaylistStarted:
+			a.importv.ProgressCurrentPlaylist = ev.PlaylistName
 			a.importv.ProgressDone = 0
-			a.importv.ProgressTotal = ev.Int("total")
+			a.importv.ProgressTotal = ev.PlaylistTotal
 			a.importv.ProgressOverall++
 			if a.importv.ProgressOverall > a.importv.ProgressOverallTotal {
 				a.importv.ProgressOverallTotal = a.importv.ProgressOverall
 			}
-		case "track_matched":
-			a.importv.ProgressDone = ev.Int("index")
-			a.importv.ProgressTotal = ev.Int("total")
+		case importer.EventTrackMatched:
+			a.importv.ProgressDone = ev.TrackIndex
+			a.importv.ProgressTotal = ev.PlaylistTotal
 			a.importv.Matched++
-		case "track_unmatched":
-			a.importv.ProgressDone = ev.Int("index")
-			a.importv.ProgressTotal = ev.Int("total")
-			if reason := ev.Str("reason"); strings.HasPrefix(reason, "search failed") {
+		case importer.EventTrackUnmatched:
+			a.importv.ProgressDone = ev.TrackIndex
+			a.importv.ProgressTotal = ev.PlaylistTotal
+			if strings.HasPrefix(ev.TrackReason, "search failed") {
 				a.importv.Errors++
 			} else {
 				a.importv.Unmatched++
 			}
-		case "playlist_done":
-			a.importv.JobURL = ev.Str("url")
-		case "job_done":
+		case importer.EventPlaylistDone:
+			a.importv.JobURL = ev.PlaylistURL
+		case importer.EventJobDone:
 			a.importv.Stage = components.ImportStageDone
-			a.importv.ProgressOverallTotal = ev.Int("playlists")
+			a.importv.ProgressOverallTotal = ev.PlaylistCount
 			if a.importEventsCancel != nil {
 				a.importEventsCancel()
 				a.importEventsCancel = nil
 			}
 			a.importEvents = nil
-			// Refresh the sidebar so the new [YT] playlists show up.
 			if a.client != nil {
 				a.playlist.Items = nil
 				return a, FetchPlaylistsCmd(a.client, 0)
 			}
 			return a, nil
-		case "error", "stream_error":
+		case importer.EventError:
 			a.importv.Stage = components.ImportStageError
-			a.importv.Err = fmt.Errorf("%s", ev.Str("message"))
+			a.importv.Err = fmt.Errorf("%s", ev.Message)
 			if a.importEventsCancel != nil {
 				a.importEventsCancel()
 				a.importEventsCancel = nil
@@ -484,12 +495,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, ListenImportEventCmd(a.importEvents)
 	case ImportStreamClosedMsg:
-		// Stream closed without a terminal event — probably a network
-		// drop. If we're still in the importing stage, fall back to the
-		// REST job endpoint so the user sees a final state.
 		if a.importv.Stage == components.ImportStageImporting {
 			a.importv.Stage = components.ImportStageError
-			a.importv.Err = fmt.Errorf("import stream closed unexpectedly — check the backend or try again")
+			a.importv.Err = fmt.Errorf("import event stream closed unexpectedly")
 		}
 		return a, nil
 
@@ -1408,11 +1416,11 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a.handleImportEnter()
 		case "r":
-			// Re-open the browser for whichever service still needs auth.
-			if a.importv.Stage == components.ImportStageAwaitingAuth && a.importSession != nil {
+			// Retry the OAuth flow for whichever service still needs auth.
+			if a.importv.Stage == components.ImportStageAwaitingAuth && a.importClient != nil {
 				if next := a.importv.NextServiceToConnect(); next != "" {
-					openBrowser(a.importClient.AuthStartURL(next, a.importSession.SessionID))
 					a.importv.AuthBrowserOpenedFor = next
+					return a, AuthServiceCmd(a.importClient, next)
 				}
 			}
 		case "esc", "h":
@@ -1663,16 +1671,21 @@ func (a App) handleRightKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleImportEnter drives the Import view's state machine on Enter
-// presses. The flow is linear (no source picker — first release is YT
-// Music → Spotify only): Idle → EnsuringSession → AwaitingAuth →
-// LoadingLibrary → LibraryLoaded → Importing → Done/Error.
+// presses. v0.3.0 flow: everything runs locally via the embedded
+// importbackend client. Idle → EnsuringSession (just a status
+// check) → AwaitingAuth (per-service loopback OAuth, sequential)
+// → LoadingLibrary → LibraryLoaded → Importing → Done/Error.
 func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
+	if a.importClient == nil {
+		a.importv.Err = fmt.Errorf("import requires Google Cloud OAuth credentials — re-run onboarding to add them")
+		a.importv.Stage = components.ImportStageError
+		return a, nil
+	}
 	switch a.importv.Stage {
 	case components.ImportStageIdle:
 		a.importv.Stage = components.ImportStageEnsuringSession
-		return a, EnsureBackendSessionCmd(a.importClient)
+		return a, CheckServicesCmd(a.importClient)
 	case components.ImportStageError:
-		// Cancel any leftover SSE stream before resetting.
 		if a.importEventsCancel != nil {
 			a.importEventsCancel()
 			a.importEventsCancel = nil
@@ -1681,16 +1694,8 @@ func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
 		a.importv.Reset()
 		return a, nil
 	case components.ImportStageLibraryLoaded:
-		return a, StartImportCmd(
-			a.importClient,
-			a.importSession.SessionID,
-			a.importSession.CSRFToken,
-			false, // include_liked — Liked Videos are rarely music, skip
-		)
+		return a, StartImportCmd(a.importClient, false /* include_liked */)
 	case components.ImportStageDone:
-		// Run another import — back to library-loaded so the user can
-		// confirm before kicking another job (and the library may have
-		// changed since last time).
 		a.importv.ProgressOverall = 0
 		a.importv.ProgressOverallTotal = 0
 		a.importv.ProgressDone = 0
@@ -1700,7 +1705,7 @@ func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
 		a.importv.Errors = 0
 		a.importv.JobURL = ""
 		a.importv.Stage = components.ImportStageLoadingLibrary
-		return a, LoadLibraryFromBackendCmd(a.importClient, a.importSession.SessionID)
+		return a, LoadLibraryCmd(a.importClient)
 	}
 	return a, nil
 }

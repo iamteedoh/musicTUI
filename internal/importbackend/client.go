@@ -1,187 +1,204 @@
+// Package importbackend is the TUI-facing wrapper around the shared
+// github.com/iamteedoh/musictui-import module. Everything runs
+// locally — OAuth loopback, YT Data API calls, Spotify calls,
+// matching, importing. No remote service.
+//
+// The package name is kept for historical continuity (v0.2.0 had a
+// remote backend; internal/importbackend/ was the HTTP client for
+// it) — messages.go and app.go references didn't need rewriting
+// when the internals changed.
 package importbackend
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
+	"os/exec"
+	"runtime"
+
+	"github.com/iamteedoh/musictui-import/importer"
+	"github.com/iamteedoh/musictui-import/oauth"
+	"github.com/iamteedoh/musictui-import/services/spotify"
+	"github.com/iamteedoh/musictui-import/services/youtube"
+	"github.com/iamteedoh/musictui-import/store"
 )
 
-// DefaultBackendURL is the public hosted backend. Self-hosters override
-// via [import_backend] url = ... in config.toml.
-const DefaultBackendURL = "https://musictui-import.iamteedoh.dev"
-
-// Client wraps the HTTP surface of musictui-import. One per app
-// session; safe to share across goroutines.
+// Client is the TUI-side handle into the shared import module.
+// Holds the token store + per-service OAuth configs + lazily-built
+// service clients.
 type Client struct {
-	baseURL string
-	http    *http.Client
+	store   *store.FileStore
+	google  oauth.GoogleConfig
+	spotify oauth.SpotifyConfig
+
+	gmgr *oauth.GoogleTokenManager
+	smgr *oauth.SpotifyTokenManager
 }
 
-// NewClient builds a Client with a sensible timeout. Pass an empty
-// string to use DefaultBackendURL.
-func NewClient(baseURL string) *Client {
-	if baseURL == "" {
-		baseURL = DefaultBackendURL
-	}
-	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		// Long timeout — library reads against YT Data API can take
-		// a bit for libraries with many playlists. SSE uses a
-		// separate, untimed client (see ListenEvents).
-		http: &http.Client{Timeout: 90 * time.Second},
-	}
-}
-
-// BackendURL returns the configured base URL — used to build the
-// browser-side OAuth start URLs.
-func (c *Client) BackendURL() string { return c.baseURL }
-
-// AuthStartURL is the URL the CLI hands to the user's default browser
-// to begin OAuth for `service` ("youtube" or "spotify"). The backend
-// 302s to Google/Spotify and back to its own callback; the browser
-// finally lands on a "you can close this tab" page.
-func (c *Client) AuthStartURL(service, sessionID string) string {
-	return fmt.Sprintf(
-		"%s/auth/%s/start?session=%s",
-		c.baseURL, service, url.QueryEscape(sessionID),
-	)
-}
-
-// CreateSession mints a fresh session on the backend and returns the
-// credentials the CLI should persist.
-func (c *Client) CreateSession(ctx context.Context) (*Session, error) {
-	var resp struct {
-		SessionID string `json:"session_id"`
-		CSRFToken string `json:"csrf_token"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := c.do(ctx, "POST", "/api/session", nil, "", &resp); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
-	return &Session{
-		SessionID:  resp.SessionID,
-		CSRFToken:  resp.CSRFToken,
-		ExpiresAt:  resp.ExpiresAt,
-		BackendURL: c.baseURL,
-	}, nil
-}
-
-// GetSessionState fetches the session's current OAuth-connection
-// state. Returns nil session and 404 if the backend forgot us
-// (expired or rotated DB).
-func (c *Client) GetSessionState(ctx context.Context, sessionID string) (*SessionState, error) {
-	var s SessionState
-	if err := c.do(ctx, "GET", "/api/session/"+url.PathEscape(sessionID), nil, "", &s); err != nil {
+// NewClient builds a Client rooted at `dir` for token storage.
+// Callers pass the user-configured Google + Spotify OAuth client
+// creds; if either is missing, methods that need them return an
+// error telling the caller to run onboarding.
+func NewClient(dir string, google oauth.GoogleConfig, spotify oauth.SpotifyConfig) (*Client, error) {
+	st, err := store.NewFileStore(dir)
+	if err != nil {
 		return nil, err
 	}
-	return &s, nil
-}
-
-// LoadYouTubeLibrary fetches playlists + liked count for the session.
-// Backend returns 400 if YouTube isn't connected — surface that
-// distinctly so the UI can prompt for re-auth.
-func (c *Client) LoadYouTubeLibrary(ctx context.Context, sessionID string) (*YouTubeLibrary, error) {
-	var lib YouTubeLibrary
-	path := "/api/session/" + url.PathEscape(sessionID) + "/library/youtube"
-	if err := c.do(ctx, "GET", path, nil, "", &lib); err != nil {
-		return nil, err
+	c := &Client{
+		store:   st,
+		google:  google,
+		spotify: spotify,
 	}
-	return &lib, nil
+	c.gmgr = &oauth.GoogleTokenManager{Store: st, Config: google}
+	c.smgr = &oauth.SpotifyTokenManager{Store: st, Config: spotify}
+	return c, nil
 }
 
-// StartImport kicks an import job and returns the job_id. CSRF token
-// is required by the backend on this mutation.
-func (c *Client) StartImport(
-	ctx context.Context, sessionID, csrfToken string, req ImportRequest,
-) (string, error) {
-	var resp StartImportResponse
-	path := "/api/session/" + url.PathEscape(sessionID) + "/import"
-	if err := c.do(ctx, "POST", path, req, csrfToken, &resp); err != nil {
-		return "", err
+// ServicesStatus inspects the local store and reports which services
+// have valid tokens.
+type ServicesStatus struct {
+	YouTube bool
+	Spotify bool
+}
+
+// Services returns the current connection status by looking at the
+// on-disk token store. Cheap — no network.
+func (c *Client) Services() (ServicesStatus, error) {
+	out := ServicesStatus{}
+	yt, err := c.store.Load("youtube")
+	if err != nil {
+		return out, err
 	}
-	return resp.JobID, nil
-}
-
-// GetJob fetches the final/current state of a job — used as a fallback
-// when SSE drops or after re-launch to recover an in-flight import.
-func (c *Client) GetJob(ctx context.Context, sessionID, jobID string) (*JobState, error) {
-	var st JobState
-	path := "/api/session/" + url.PathEscape(sessionID) + "/jobs/" + url.PathEscape(jobID)
-	if err := c.do(ctx, "GET", path, nil, "", &st); err != nil {
-		return nil, err
+	out.YouTube = yt != nil
+	sp, err := c.store.Load("spotify")
+	if err != nil {
+		return out, err
 	}
-	return &st, nil
+	out.Spotify = sp != nil
+	return out, nil
 }
 
-// EventsURL returns the absolute SSE URL for a job. The SSE consumer
-// uses a separate, untimed HTTP client.
-func (c *Client) EventsURL(sessionID, jobID string) string {
-	return fmt.Sprintf(
-		"%s/api/session/%s/jobs/%s/events",
-		c.baseURL,
-		url.PathEscape(sessionID),
-		url.PathEscape(jobID),
-	)
-}
-
-// ─────────── internals ───────────
-
-// HTTPError is returned when the backend responds with a non-2xx.
-// Carries the status code so callers can distinguish 404 (session
-// missing → re-create) from 401/403 (auth → re-connect service).
-type HTTPError struct {
-	Status int
-	Body   string
-}
-
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("backend returned %d: %s", e.Status, e.Body)
-}
-
-func (c *Client) do(
-	ctx context.Context,
-	method, path string,
-	body any,
-	csrf string,
-	out any,
-) error {
-	var reqBody io.Reader
-	if body != nil {
-		buf, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reqBody = bytes.NewReader(buf)
+// AuthYouTube runs the Google OAuth loopback flow end-to-end and
+// persists the resulting token. Blocks until the browser redirects
+// back or ctx times out.
+func (c *Client) AuthYouTube(ctx context.Context) error {
+	if c.google.ClientID == "" || c.google.ClientSecret == "" {
+		return errors.New("Google OAuth credentials not configured — re-run onboarding")
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	lb, err := oauth.Listen("")
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if csrf != "" {
-		req.Header.Set("X-CSRF-Token", csrf)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
+	verifier, challenge, err := oauth.PKCE()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return &HTTPError{Status: resp.StatusCode, Body: string(respBody)}
+	state := oauth.State()
+	authURL := oauth.GoogleAuthorizeURL(c.google, lb.URL, state, challenge)
+	_ = openBrowser(authURL)
+
+	res := lb.Wait(ctx)
+	if res.Err != nil {
+		return res.Err
 	}
-	if out == nil || len(respBody) == 0 {
-		return nil
+	if res.State != state {
+		return errors.New("state nonce mismatch — possible CSRF")
 	}
-	return json.Unmarshal(respBody, out)
+	tok, err := oauth.GoogleExchangeCode(ctx, c.google, lb.URL, res.Code, verifier)
+	if err != nil {
+		return fmt.Errorf("google token exchange: %w", err)
+	}
+	return c.store.Save("youtube", &oauth.ServiceToken{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    tok.ExpiresAt,
+		Scope:        tok.Scope,
+	})
+}
+
+// AuthSpotify runs the Spotify OAuth loopback flow and persists the
+// resulting token.
+func (c *Client) AuthSpotify(ctx context.Context) error {
+	if c.spotify.ClientID == "" || c.spotify.ClientSecret == "" {
+		return errors.New("Spotify OAuth credentials not configured — re-run onboarding")
+	}
+	lb, err := oauth.Listen("")
+	if err != nil {
+		return err
+	}
+	state := oauth.State()
+	authURL := oauth.SpotifyAuthorizeURL(c.spotify, lb.URL, state)
+	_ = openBrowser(authURL)
+
+	res := lb.Wait(ctx)
+	if res.Err != nil {
+		return res.Err
+	}
+	if res.State != state {
+		return errors.New("state nonce mismatch — possible CSRF")
+	}
+	tok, err := oauth.SpotifyExchangeCode(ctx, c.spotify, lb.URL, res.Code)
+	if err != nil {
+		return fmt.Errorf("spotify token exchange: %w", err)
+	}
+	return c.store.Save("spotify", &oauth.ServiceToken{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    tok.ExpiresAt,
+		Scope:        tok.Scope,
+	})
+}
+
+// LoadLibrary fetches playlists + liked count from YouTube.
+func (c *Client) LoadLibrary(ctx context.Context) (*YouTubeLibrary, error) {
+	yt := youtube.NewClient(c.gmgr.AccessToken)
+	playlists, err := yt.ListPlaylists(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Liked count is informational; ignore errors (users commonly
+	// have no liked videos and YT can 404 sporadically).
+	liked, _ := yt.ListLikedVideos(ctx)
+
+	out := &YouTubeLibrary{
+		LikedCount: len(liked),
+		Playlists:  make([]PlaylistSummary, 0, len(playlists)),
+	}
+	for _, p := range playlists {
+		out.Playlists = append(out.Playlists, PlaylistSummary{
+			ID:         p.ID,
+			Name:       p.Name,
+			TrackCount: p.TrackCount,
+		})
+	}
+	return out, nil
+}
+
+// StartImport kicks the importer in a goroutine and returns the
+// event channel immediately. Caller reads one event at a time
+// (typically via a tea.Cmd loop).
+func (c *Client) StartImport(ctx context.Context, req ImportRequest) <-chan importer.Event {
+	yt := youtube.NewClient(c.gmgr.AccessToken)
+	sp := spotify.NewClient(c.smgr.AccessToken)
+	return importer.Run(ctx, yt, sp, importer.Request{
+		Source:       req.Source,
+		Dest:         req.Dest,
+		PlaylistIDs:  req.PlaylistIDs,
+		IncludeLiked: req.IncludeLiked,
+	})
+}
+
+// ─────────────────── browser helper ───────────────────
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }
