@@ -3,18 +3,16 @@ package tui
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/audio"
+	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/lyrics"
 	"github.com/iamteedoh/musicTUI/internal/model"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musicTUI/internal/applemusic"
-	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
 // Navigation
@@ -257,256 +255,133 @@ func ApplyUpdateCmd(rel *update.Release) tea.Cmd {
 	}
 }
 
-// ═════════ YT Music import messages ═════════
+// ═════════ Import-backend messages (v0.2.0) ═════════
 
-// Auth phase: device flow.
-type YTDeviceCodeMsg struct {
-	Auth *ytmusic.DeviceAuth
+// SessionReadyMsg lands when the CLI either restored a cached session
+// or minted a fresh one against the import backend.
+type SessionReadyMsg struct {
+	Session *importbackend.Session
 }
-type YTAuthSuccessMsg struct {
-	Token *ytmusic.Token
-}
-type YTAuthErrorMsg struct {
-	Err error
+type SessionErrorMsg struct{ Err error }
+
+// SessionStateMsg is emitted by the polling loop once per tick — the
+// view inspects the Services map to decide whether it can move on
+// from "awaiting auth".
+type SessionStateMsg struct {
+	State *importbackend.SessionState
 }
 
-// Library read phase.
-type YTLibraryLoadedMsg struct {
-	Playlists  []ytmusic.Playlist
-	LikedCount int
-	Albums     []ytmusic.Album
-	Artists    []ytmusic.Artist
+// LibraryLoadedFromBackendMsg lands after GET /library/youtube.
+type LibraryLoadedFromBackendMsg struct {
+	Library *importbackend.YouTubeLibrary
 }
-type YTLibraryErrorMsg struct{ Err error }
+type LibraryErrorFromBackendMsg struct{ Err error }
 
-// Import phase.
-type YTImportProgressMsg struct {
-	PlaylistName   string
-	Done, Total    int
-	Overall, Count int
+// ImportStartedMsg lands when POST /import returned a job_id.
+type ImportStartedMsg struct {
+	JobID string
 }
-type YTImportDoneMsg struct {
-	Summaries []ytmusic.ImportSummary
+type ImportStartErrorMsg struct{ Err error }
+
+// ImportEventMsg is one decoded SSE frame — emitted repeatedly until
+// a terminal event closes the stream.
+type ImportEventMsg struct {
+	Event importbackend.Event
 }
-type YTImportErrorMsg struct{ Err error }
+type ImportStreamClosedMsg struct{}
 
-// ─────── commands ───────
+// EnsureBackendSessionCmd reads the cached session file. If a valid
+// session exists it returns SessionReadyMsg. Otherwise it mints a new
+// one via POST /api/session and persists it.
+func EnsureBackendSessionCmd(client *importbackend.Client) tea.Cmd {
+	return func() tea.Msg {
+		// Try cached first.
+		if cached, err := importbackend.LoadSession(); err == nil && cached != nil {
+			// Validate it still works on the backend. If the session was
+			// purged server-side we'll silently fall through to creating
+			// a fresh one.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := client.GetSessionState(ctx, cached.SessionID); err == nil {
+				return SessionReadyMsg{Session: cached}
+			}
+			// Backend forgot us — clear the stale file before re-creating.
+			_ = importbackend.ClearSession()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		sess, err := client.CreateSession(ctx)
+		if err != nil {
+			return SessionErrorMsg{Err: err}
+		}
+		_ = importbackend.SaveSession(sess)
+		return SessionReadyMsg{Session: sess}
+	}
+}
 
-// StartYTDeviceAuthCmd kicks off the device flow and returns the
-// device code to display to the user. Caller should then run
-// PollYTAuthCmd to watch for approval.
-func StartYTDeviceAuthCmd() tea.Cmd {
+// PollSessionStateCmd waits ~2 seconds then fetches the session state
+// once. The view re-issues this command in a loop while it's waiting
+// for OAuth to complete; bounding to a single fetch keeps the BubbleTea
+// command surface simple and avoids long-lived goroutines that would
+// outlive a view change.
+func PollSessionStateCmd(client *importbackend.Client, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(2 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		state, err := client.GetSessionState(ctx, sessionID)
+		if err != nil {
+			return SessionErrorMsg{Err: err}
+		}
+		return SessionStateMsg{State: state}
+	}
+}
+
+// LoadLibraryFromBackendCmd hits GET /library/youtube.
+func LoadLibraryFromBackendCmd(client *importbackend.Client, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		lib, err := client.LoadYouTubeLibrary(ctx, sessionID)
+		if err != nil {
+			return LibraryErrorFromBackendMsg{Err: err}
+		}
+		return LibraryLoadedFromBackendMsg{Library: lib}
+	}
+}
+
+// StartImportCmd kicks the backend job. Currently always full library
+// (all playlists + liked); per-playlist selection is Phase E.
+func StartImportCmd(
+	client *importbackend.Client, sessionID, csrfToken string, includeLiked bool,
+) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		auth, err := ytmusic.RequestDeviceCode(ctx)
+		jobID, err := client.StartImport(ctx, sessionID, csrfToken, importbackend.ImportRequest{
+			Source:       "youtube",
+			Dest:         "spotify",
+			IncludeLiked: includeLiked,
+		})
 		if err != nil {
-			return YTAuthErrorMsg{Err: err}
+			return ImportStartErrorMsg{Err: err}
 		}
-		return YTDeviceCodeMsg{Auth: auth}
+		return ImportStartedMsg{JobID: jobID}
 	}
 }
 
-// PollYTAuthCmd blocks (with the caller-supplied context, which
-// should be cancelled if the user navigates away) until the user
-// approves the device code or it expires. Emits YTAuthSuccessMsg
-// or YTAuthErrorMsg.
-func PollYTAuthCmd(deviceCode string, interval int) tea.Cmd {
+// ListenImportEventCmd reads ONE event from the SSE channel and
+// returns it as a message. The app re-issues the command after each
+// event lands to keep pumping the stream into the BubbleTea event
+// loop. The stream context is owned by the caller; cancelling it
+// causes the next read to return ImportStreamClosedMsg.
+func ListenImportEventCmd(events <-chan importbackend.Event) tea.Cmd {
 	return func() tea.Msg {
-		// Use a generous overall timeout — device codes live ~15 minutes.
-		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
-		defer cancel()
-		tok, err := ytmusic.PollForToken(ctx, deviceCode, interval)
-		if err != nil {
-			return YTAuthErrorMsg{Err: err}
+		ev, ok := <-events
+		if !ok {
+			return ImportStreamClosedMsg{}
 		}
-		_ = ytmusic.SaveToken(tok)
-		return YTAuthSuccessMsg{Token: tok}
-	}
-}
-
-// LoadYTLibraryCmd fetches playlists / liked / albums / artists in
-// parallel-ish sequence and returns a single message with all of
-// them. The liked-songs count comes from the "LM" playlist's size.
-func LoadYTLibraryCmd(tok *ytmusic.Token) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		client := ytmusic.NewClient(tok)
-
-		playlists, err := client.GetLibraryPlaylists(ctx)
-		if err != nil {
-			return YTLibraryErrorMsg{Err: fmt.Errorf("playlists: %w", err)}
-		}
-		// Liked songs can be large; getting the count just means
-		// fetching the LM playlist and returning its length. Not ideal
-		// (downloads all tracks), but YT doesn't give us a header-only
-		// way. Acceptable for a summary; we re-fetch during import.
-		liked, err := client.GetLikedSongs(ctx)
-		if err != nil {
-			// Non-fatal — some users have no liked songs, and if YT is
-			// being weird we'd rather show a 0 than fail the whole load.
-			liked = nil
-		}
-		albums, err := client.GetLibraryAlbums(ctx)
-		if err != nil {
-			albums = nil
-		}
-		artists, err := client.GetLibraryArtists(ctx)
-		if err != nil {
-			artists = nil
-		}
-		return YTLibraryLoadedMsg{
-			Playlists:  playlists,
-			LikedCount: len(liked),
-			Albums:     albums,
-			Artists:    artists,
-		}
-	}
-}
-
-// RunYTImportCmd runs ImportPlaylists + ImportLikedSongs end-to-end
-// and returns the aggregated summaries. Progress is NOT streamed here
-// in the first release — the view shows a simple spinner with the
-// most-recent playlist name (updated by a goroutine that writes to
-// app state via an atomic pointer). We'll add real progress streaming
-// if users ask for it; for a first cut, "it's doing the thing, be
-// patient" is enough given the whole import typically finishes in
-// under a minute for a few hundred tracks.
-func RunYTImportCmd(tok *ytmusic.Token, spClient *sp.Client) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-		yt := ytmusic.NewClient(tok)
-
-		summaries, err := ytmusic.ImportPlaylists(ctx, yt, spClient, nil)
-		if err != nil {
-			return YTImportErrorMsg{Err: err}
-		}
-		// Liked songs as an additional playlist.
-		if liked, lerr := ytmusic.ImportLikedSongs(ctx, yt, spClient, nil); lerr == nil && liked != nil {
-			summaries = append(summaries, *liked)
-		}
-		return YTImportDoneMsg{Summaries: summaries}
-	}
-}
-
-// ═════════ Apple Music import messages ═════════
-
-// AMAuthPageMsg is emitted right after we've started the local
-// callback listener and constructed the browser URL. The TUI then
-// opens the URL, stays on a waiting screen, and a subsequent
-// AMAuthSuccessMsg lands when the user completes sign-in.
-type AMAuthPageMsg struct {
-	URL string // URL we opened in the browser
-}
-type AMAuthSuccessMsg struct {
-	Creds *applemusic.Credentials
-}
-type AMAuthErrorMsg struct{ Err error }
-
-type AMLibraryLoadedMsg struct {
-	Playlists  []applemusic.Playlist
-	LikedCount int
-	Albums     []applemusic.Album
-	Artists    []applemusic.Artist
-}
-type AMLibraryErrorMsg struct{ Err error }
-
-type AMImportDoneMsg struct {
-	Summaries []applemusic.ImportSummary
-}
-type AMImportErrorMsg struct{ Err error }
-
-// StartAMAuthCmd launches the Apple Music callback-listener + opens
-// the hosted auth page in the user's browser. The browser flow
-// completes asynchronously; AMAuthSuccessMsg lands when MusicKit hands
-// us the Music User Token.
-func StartAMAuthCmd(authPageURL, developerToken string, port int) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		// intentionally don't cancel() here — the callback listener
-		// lives for the duration of the flow. The timeout still
-		// bounds it.
-		_ = cancel
-
-		cbURL, state, ch, err := applemusic.StartCallbackServer(ctx, port)
-		if err != nil {
-			return AMAuthErrorMsg{Err: fmt.Errorf("start callback server: %w", err)}
-		}
-
-		// Build the browser URL with dev token + callback + state.
-		u, err := url.Parse(authPageURL)
-		if err != nil {
-			return AMAuthErrorMsg{Err: fmt.Errorf("invalid auth_page_url: %w", err)}
-		}
-		q := u.Query()
-		q.Set("dev", developerToken)
-		q.Set("cb", cbURL)
-		q.Set("state", state)
-		u.RawQuery = q.Encode()
-
-		go func() {
-			// Fire in a goroutine so we can return the URL to the UI
-			// immediately; the actual browser exec can take a beat.
-			openBrowser(u.String())
-		}()
-
-		select {
-		case res := <-ch:
-			if res.Err != nil {
-				return AMAuthErrorMsg{Err: res.Err}
-			}
-			creds := &applemusic.Credentials{
-				DeveloperToken: developerToken,
-				MusicUserToken: res.MusicUserToken,
-				ObtainedAt:     time.Now(),
-			}
-			_ = applemusic.SaveCredentials(creds)
-			return AMAuthSuccessMsg{Creds: creds}
-		case <-ctx.Done():
-			return AMAuthErrorMsg{Err: fmt.Errorf("timeout waiting for Apple Music sign-in")}
-		}
-	}
-}
-
-// LoadAMLibraryCmd fetches playlists / library songs / albums /
-// artists. Mirrors LoadYTLibraryCmd.
-func LoadAMLibraryCmd(creds *applemusic.Credentials) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		am := applemusic.NewClient(creds)
-		playlists, err := am.GetLibraryPlaylists(ctx)
-		if err != nil {
-			return AMLibraryErrorMsg{Err: fmt.Errorf("playlists: %w", err)}
-		}
-		liked, _ := am.GetLikedSongs(ctx)
-		albums, _ := am.GetLibraryAlbums(ctx)
-		artists, _ := am.GetLibraryArtists(ctx)
-		return AMLibraryLoadedMsg{
-			Playlists:  playlists,
-			LikedCount: len(liked),
-			Albums:     albums,
-			Artists:    artists,
-		}
-	}
-}
-
-// RunAMImportCmd does the full Apple Music import.
-func RunAMImportCmd(creds *applemusic.Credentials, spClient *sp.Client) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-		am := applemusic.NewClient(creds)
-		summaries, err := applemusic.ImportPlaylists(ctx, am, spClient)
-		if err != nil {
-			return AMImportErrorMsg{Err: err}
-		}
-		if liked, lerr := applemusic.ImportLikedSongs(ctx, am, spClient); lerr == nil && liked != nil {
-			summaries = append(summaries, *liked)
-		}
-		return AMImportDoneMsg{Summaries: summaries}
+		return ImportEventMsg{Event: ev}
 	}
 }
 

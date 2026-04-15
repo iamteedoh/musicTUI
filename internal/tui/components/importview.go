@@ -5,134 +5,137 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/theme"
-	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
-// ImportSource identifies which upstream the user picked to import
-// from. Set in ImportStageIdle when the user chooses and read by the
-// app's key handler to route into the right command.
-type ImportSource int
-
-const (
-	SourceNone   ImportSource = iota
-	SourceYT     // YouTube Music
-	SourceApple  // Apple Music
-)
-
-// ImportStage is the high-level state of the import view. The app
-// transitions between stages as async commands (device-code request,
-// auth polling, library reads, the import itself) complete.
+// ImportStage is the high-level state of the Import screen. The app
+// transitions stages as backend RPCs and SSE events land.
 type ImportStage int
 
 const (
-	// ImportStageIdle: user hasn't started anything yet. Shows a
-	// source picker (YouTube Music / Apple Music).
+	// ImportStageIdle: nothing started yet — show the "Import from
+	// YouTube Music" intro and an Enter-to-begin prompt.
 	ImportStageIdle ImportStage = iota
-	// ImportStageDeviceCode: device-flow in progress. We have a user
-	// code to show; we're polling Google every N seconds for approval.
-	ImportStageDeviceCode
-	// ImportStageAuthed: have a valid token but haven't loaded the
-	// library yet.
-	ImportStageAuthed
-	// ImportStageLoadingLibrary: actively fetching library from YT.
+	// ImportStageEnsuringSession: hitting POST /api/session on first
+	// run, or validating a cached session_id on relaunch.
+	ImportStageEnsuringSession
+	// ImportStageAwaitingAuth: backend session exists but at least one
+	// of {youtube, spotify} isn't connected yet. We've opened the
+	// browser at /auth/<service>/start and we're polling the session
+	// state until both flip to true.
+	ImportStageAwaitingAuth
+	// ImportStageLoadingLibrary: GET /library/youtube in flight.
 	ImportStageLoadingLibrary
-	// ImportStageLibraryLoaded: shows how many playlists / liked songs
-	// / albums were found, with a prompt to start the import.
+	// ImportStageLibraryLoaded: shows the playlist + liked counts and
+	// asks the user to confirm before kicking the import.
 	ImportStageLibraryLoaded
-	// ImportStageImporting: the import is running. Progress text shows
-	// which playlist is being matched and how far along we are.
+	// ImportStageImporting: SSE stream is active. Per-track / per-
+	// playlist progress shows in real time.
 	ImportStageImporting
-	// ImportStageDone: finished. Shows per-playlist match counts and
-	// unmatched-track tally so the user can spot drops.
+	// ImportStageDone: terminal success.
 	ImportStageDone
-	// ImportStageError: an unrecoverable error during any of the
-	// stages above. User can retry by pressing Enter.
+	// ImportStageError: terminal failure.
 	ImportStageError
 )
 
-// Import is the state + renderer for the Import screen. Most fields
-// are populated by the app's message handlers as async commands land.
+// Import is the state + renderer for the Import screen.
 type Import struct {
-	Stage  ImportStage
-	Source ImportSource // chosen during Idle; drives which command runs
+	Stage ImportStage
 
-	// Source-selector state — which option is highlighted in Idle
-	Selected int // 0 = YouTube Music, 1 = Apple Music
+	// Auth phase
+	BackendURL          string
+	YouTubeConnected    bool
+	SpotifyConnected    bool
+	AuthBrowserOpenedFor string // "youtube" | "spotify" | "" — last service we opened for
 
-	// Apple Music specific: true iff AppleMusic config is populated
-	AppleConfigured bool
+	// Library phase
+	Playlists  []importbackend.PlaylistSummary
+	LikedCount int
 
-	// Device-flow display
-	UserCode        string
-	VerificationURL string
-
-	// Library summary (populated on ImportStageLibraryLoaded)
-	Playlists    []ytmusic.Playlist
-	LikedCount   int
-	Albums       []ytmusic.Album
-	Artists      []ytmusic.Artist
-
-	// Progress (populated during ImportStageImporting)
+	// Import phase (streamed via SSE)
+	JobID                   string
 	ProgressCurrentPlaylist string
 	ProgressDone            int
 	ProgressTotal           int
-	ProgressOverall         int
-	ProgressOverallTotal    int
+	ProgressOverall         int // playlists finished
+	ProgressOverallTotal    int // total playlists in this run (incl. Liked)
 
-	// Terminal states
-	Summaries []ytmusic.ImportSummary
-	Err       error
+	// Terminal results
+	Matched   int
+	Unmatched int
+	Errors    int
+	JobURL    string // open.spotify.com URL of the most-recent created playlist (last seen)
+
+	Err error
 }
 
 func NewImport() Import {
 	return Import{Stage: ImportStageIdle}
 }
 
-// Reset clears everything back to the idle state. Called on close-and-
-// reopen so re-running an import starts clean. AppleConfigured stays
-// since it's a derived config flag, not session state.
+// Reset clears everything back to the idle state — called when the
+// user presses Enter from a terminal state to run another import, and
+// when they navigate away.
 func (i *Import) Reset() {
-	apple := i.AppleConfigured
-	*i = Import{Stage: ImportStageIdle, AppleConfigured: apple}
+	*i = Import{Stage: ImportStageIdle, BackendURL: i.BackendURL}
 }
 
-// SelectUp / SelectDown move the highlight in the source picker.
-func (i *Import) SelectUp() {
-	if i.Stage == ImportStageIdle && i.Selected > 0 {
-		i.Selected--
+// HardReset clears everything including BackendURL — used when the
+// import-backend URL changes from settings.
+func (i *Import) HardReset() { *i = Import{Stage: ImportStageIdle} }
+
+// BothConnected reports whether the user has finished both OAuth
+// flows for the current import. The view advances to the
+// "library" stage automatically once this is true.
+func (i Import) BothConnected() bool { return i.YouTubeConnected && i.SpotifyConnected }
+
+// NextServiceToConnect names the service the user still needs to
+// auth — drives which URL we open in their browser. Returns "" if
+// both are connected.
+func (i Import) NextServiceToConnect() string {
+	if !i.YouTubeConnected {
+		return "youtube"
 	}
-}
-func (i *Import) SelectDown() {
-	if i.Stage == ImportStageIdle && i.Selected < 1 {
-		i.Selected++
+	if !i.SpotifyConnected {
+		return "spotify"
 	}
+	return ""
 }
 
 func (i Import) View(th theme.Theme, width, height int) string {
+	// Reserve one char of inset on either side so long lines don't
+	// collide with the surrounding panel border.
+	inner := width - 2
+	if inner < 20 {
+		inner = 20
+	}
+
+	wrap := lipgloss.NewStyle().Width(inner)
+
 	title := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).
 		Render("Import from YouTube Music")
-	sub := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).
-		Render("One-time import of your YT Music library into Spotify.")
+	sub := wrap.Foreground(th.FgMuted).Italic(true).
+		Render("Server-mediated transfer into Spotify.")
 
 	var body string
 	switch i.Stage {
 	case ImportStageIdle:
-		body = i.viewIdle(th)
-	case ImportStageDeviceCode:
-		body = i.viewDeviceCode(th)
-	case ImportStageAuthed:
-		body = i.viewAuthed(th)
+		body = i.viewIdle(th, inner)
+	case ImportStageEnsuringSession:
+		body = i.viewEnsuringSession(th)
+	case ImportStageAwaitingAuth:
+		body = i.viewAwaitingAuth(th, inner)
 	case ImportStageLoadingLibrary:
 		body = i.viewLoadingLibrary(th)
 	case ImportStageLibraryLoaded:
-		body = i.viewLibraryLoaded(th)
+		body = i.viewLibraryLoaded(th, inner)
 	case ImportStageImporting:
 		body = i.viewImporting(th, width)
 	case ImportStageDone:
 		body = i.viewDone(th, width)
 	case ImportStageError:
-		body = i.viewError(th)
+		body = i.viewError(th, inner)
 	}
 
 	return " " + title + "\n " + sub + "\n\n" + body
@@ -140,114 +143,89 @@ func (i Import) View(th theme.Theme, width, height int) string {
 
 // ─────────────────── per-stage views ───────────────────
 
-func (i Import) viewIdle(th theme.Theme) string {
-	body := lipgloss.NewStyle().Foreground(th.Fg).Width(66)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(66)
+func (i Import) viewIdle(th theme.Theme, w int) string {
+	body := lipgloss.NewStyle().Foreground(th.Fg).Width(w)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	selected := lipgloss.NewStyle().
-		Foreground(th.Surface).
-		Background(th.Accent).
-		Bold(true).
-		Padding(0, 1)
-	unselected := lipgloss.NewStyle().Foreground(th.Fg).Padding(0, 1)
 
 	var b strings.Builder
-	b.WriteString(" " + body.Render("Import your playlists and library from another streaming service into Spotify. This runs on demand — nothing happens automatically."))
+	b.WriteString(" " + body.Render("Import your YouTube Music playlists into Spotify."))
 	b.WriteString("\n\n")
-	b.WriteString(" " + accent.Render("Choose a source:"))
-	b.WriteString("\n\n")
-
-	// Source picker
-	opts := []struct {
-		label string
-		hint  string
-		ready bool
-	}{
-		{"YouTube Music", "one-time sign-in with a short code", true},
-		{"Apple Music", "", i.AppleConfigured},
+	b.WriteString(" " + accent.Render("How it works:") + "\n")
+	for _, line := range []string{
+		"1. Sign in to YouTube and Spotify in your browser (one-time).",
+		"2. We read your YT playlists and create matching Spotify playlists.",
+		"3. Watch real-time progress; nothing existing is touched.",
+	} {
+		b.WriteString(" " + muted.Render(line) + "\n")
 	}
-	if opts[1].ready {
-		opts[1].hint = "one-time sign-in via your Apple Developer page"
-	} else {
-		opts[1].hint = "⚠ needs setup — see README (Apple Music Setup)"
-	}
-
-	for idx, opt := range opts {
-		marker := "  "
-		labelStyle := unselected
-		if idx == i.Selected {
-			marker = "▸ "
-			labelStyle = selected
-		}
-		line := " " + marker + labelStyle.Render(opt.label)
-		if opt.hint != "" {
-			line += "  " + muted.Render(opt.hint)
-		}
-		b.WriteString(line + "\n")
-	}
-
-	b.WriteString("\n " + muted.Render("Imported playlists are created with a prefix ([YT] or [AM]) so you can spot them in your Spotify sidebar and clean up later if anything goes wrong."))
+	b.WriteString("\n " + muted.Render("Runs on the musictui-import service. Self-hosters can point at their own backend via [import_backend] in config.toml."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
-		{"j/k · ↑↓", "pick"},
-		{"Enter", "start"},
+		{"Enter", "begin"},
 		{"Esc", "back"},
 	}))
 	return b.String()
 }
 
-func (i Import) viewDeviceCode(th theme.Theme) string {
-	label := lipgloss.NewStyle().Foreground(th.FgMuted)
+func (i Import) viewEnsuringSession(th theme.Theme) string {
+	return " " + lipgloss.NewStyle().Foreground(th.Accent).Render("◌ ") +
+		lipgloss.NewStyle().Foreground(th.FgDim).Italic(true).
+			Render("Connecting to import backend...")
+}
+
+func (i Import) viewAwaitingAuth(th theme.Theme, w int) string {
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	code := lipgloss.NewStyle().
-		Foreground(th.Fg).
-		Background(th.Accent).
-		Bold(true).
-		Padding(0, 2).
-		Render(" " + i.UserCode + " ")
+	ok := lipgloss.NewStyle().Foreground(th.Success).Bold(true)
+	wait := lipgloss.NewStyle().Foreground(th.FgDim).Italic(true)
 
 	var b strings.Builder
-	b.WriteString(" " + label.Render("On any device, open:") + "\n")
-	b.WriteString(" " + accent.Render(i.VerificationURL) + "\n\n")
-	b.WriteString(" " + label.Render("Enter this code:") + "\n")
-	b.WriteString(" " + code + "\n\n")
-	b.WriteString(" " + lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).
-		Render("◌ Waiting for approval... (this view will update automatically)"))
+	b.WriteString(" " + accent.Render("Connect your accounts:") + "\n\n")
+
+	for _, svc := range []struct {
+		key, label string
+		done       bool
+	}{
+		{"youtube", "YouTube Music", i.YouTubeConnected},
+		{"spotify", "Spotify", i.SpotifyConnected},
+	} {
+		marker := "○"
+		state := wait.Render("waiting...")
+		if svc.done {
+			marker = "✓"
+			state = ok.Render("connected")
+		} else if i.AuthBrowserOpenedFor == svc.key {
+			marker = "◌"
+			state = wait.Render("waiting for browser sign-in...")
+		}
+		b.WriteString(fmt.Sprintf("   %s  %s   %s\n",
+			lipgloss.NewStyle().Foreground(th.Accent).Render(marker),
+			svc.label, state))
+	}
+
+	b.WriteString("\n " + muted.Render("Your default browser should have opened. If not, copy the URL printed in the status bar."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
+		{"r", "re-open browser"},
 		{"Esc", "cancel"},
 	}))
 	return b.String()
 }
 
-func (i Import) viewAuthed(th theme.Theme) string {
-	return " " + lipgloss.NewStyle().Foreground(th.Success).Render("✓ Connected to YouTube Music") +
-		"\n\n " + lipgloss.NewStyle().Foreground(th.FgDim).Render("Press Enter to fetch your library summary.") +
-		"\n\n " + RenderHints(th, []Hint{
-			{"Enter", "load library"},
-			{"Esc", "back"},
-		})
-}
-
 func (i Import) viewLoadingLibrary(th theme.Theme) string {
 	return " " + lipgloss.NewStyle().Foreground(th.Accent).Render("◌ ") +
 		lipgloss.NewStyle().Foreground(th.FgDim).Italic(true).
-			Render("Fetching your YouTube Music library...")
+			Render("Reading your YouTube Music library...")
 }
 
-func (i Import) viewLibraryLoaded(th theme.Theme) string {
+func (i Import) viewLibraryLoaded(th theme.Theme, w int) string {
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 
 	var b strings.Builder
 	b.WriteString(" " + accent.Render("Library found:") + "\n\n")
 	b.WriteString(fmt.Sprintf("   %s  %d playlists\n",
 		accent.Render("♪"), len(i.Playlists)))
-	b.WriteString(fmt.Sprintf("   %s  %d liked songs\n",
-		accent.Render("♥"), i.LikedCount))
-	b.WriteString(fmt.Sprintf("   %s  %d saved albums\n",
-		accent.Render("◎"), len(i.Albums)))
-	b.WriteString(fmt.Sprintf("   %s  %d followed artists\n",
-		accent.Render("♧"), len(i.Artists)))
-	b.WriteString("\n " + muted.Render("Imported playlists will be prefixed with [YT] so you can spot them later. Nothing on Spotify gets deleted or modified except new playlists being created."))
+	b.WriteString("\n " + muted.Render("Each YouTube Music playlist will be created as a new Spotify playlist with the same name. Existing Spotify playlists are not touched. Non-music tracks fall below the match threshold and are reported as unmatched."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
 		{"Enter", "start import"},
 		{"Esc", "cancel"},
@@ -256,52 +234,72 @@ func (i Import) viewLibraryLoaded(th theme.Theme) string {
 }
 
 func (i Import) viewImporting(th theme.Theme, width int) string {
+	w := width - 2
+	if w < 20 {
+		w = 20
+	}
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-	dim := lipgloss.NewStyle().Foreground(th.FgDim)
+	dim := lipgloss.NewStyle().Foreground(th.FgDim).Width(w)
 
 	var b strings.Builder
 	b.WriteString(" " + accent.Render("Importing... ") +
-		dim.Render("(please don't close the app)") + "\n\n")
+		lipgloss.NewStyle().Foreground(th.FgDim).Render("(safe to leave open)") + "\n\n")
 
 	if i.ProgressOverallTotal > 0 {
-		overall := fmt.Sprintf("Playlist %d of %d", i.ProgressOverall, i.ProgressOverallTotal)
-		b.WriteString(" " + accent.Render(overall) + "\n")
+		b.WriteString(" " + accent.Render(
+			fmt.Sprintf("Playlist %d of %d", i.ProgressOverall, i.ProgressOverallTotal),
+		) + "\n")
 	}
 	if i.ProgressCurrentPlaylist != "" {
-		b.WriteString(" " + dim.Render("▸ "+truncate(i.ProgressCurrentPlaylist, 40)) + "\n")
+		b.WriteString(" " + lipgloss.NewStyle().Foreground(th.FgDim).
+			Render("▸ "+truncate(i.ProgressCurrentPlaylist, w-4)) + "\n")
 	}
 	if i.ProgressTotal > 0 {
-		bar := renderProgressBar(th, i.ProgressDone, i.ProgressTotal, width-10)
+		barWidth := w - 14
+		if barWidth < 10 {
+			barWidth = 10
+		}
+		bar := renderProgressBar(th, i.ProgressDone, i.ProgressTotal, barWidth)
 		b.WriteString(" " + bar + " " +
-			dim.Render(fmt.Sprintf("%d / %d", i.ProgressDone, i.ProgressTotal)))
+			lipgloss.NewStyle().Foreground(th.FgDim).
+				Render(fmt.Sprintf("%d / %d", i.ProgressDone, i.ProgressTotal)))
 	}
+	b.WriteString("\n\n " + dim.Render(
+		fmt.Sprintf("running tally — matched: %d  unmatched: %d  errors: %d",
+			i.Matched, i.Unmatched, i.Errors)))
 	return b.String()
 }
 
 func (i Import) viewDone(th theme.Theme, width int) string {
-	success := lipgloss.NewStyle().Foreground(th.Success).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted)
-
-	var totalMatched, totalUnmatched, totalErrors int
-	for _, s := range i.Summaries {
-		totalMatched += s.MatchedCount
-		totalUnmatched += s.UnmatchedCount
-		totalErrors += s.ErrorCount
+	w := width - 2
+	if w < 20 {
+		w = 20
 	}
+	// Indented rows get 3 chars of leading space ("   "), so wrap at w-3.
+	indented := w - 3
+	if indented < 15 {
+		indented = 15
+	}
+	success := lipgloss.NewStyle().Foreground(th.Success).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 
 	var b strings.Builder
 	b.WriteString(" " + success.Render("✓ Import complete") + "\n\n")
-	b.WriteString(fmt.Sprintf("   %d playlists imported\n", len(i.Summaries)))
-	b.WriteString(fmt.Sprintf("   %d tracks matched\n", totalMatched))
-	if totalUnmatched > 0 {
-		warn := lipgloss.NewStyle().Foreground(th.Warning)
-		b.WriteString("   " + warn.Render(fmt.Sprintf("%d tracks not found on Spotify", totalUnmatched)) + "\n")
+	b.WriteString(fmt.Sprintf("   %d playlists imported\n", i.ProgressOverallTotal))
+	b.WriteString(fmt.Sprintf("   %d tracks matched\n", i.Matched))
+	if i.Unmatched > 0 {
+		warn := lipgloss.NewStyle().Foreground(th.Warning).Width(indented)
+		b.WriteString("   " + warn.Render(
+			fmt.Sprintf("%d tracks not found on Spotify (likely non-music videos or rare tracks)", i.Unmatched),
+		) + "\n")
 	}
-	if totalErrors > 0 {
-		errStyle := lipgloss.NewStyle().Foreground(th.Error)
-		b.WriteString("   " + errStyle.Render(fmt.Sprintf("%d search errors", totalErrors)) + "\n")
+	if i.Errors > 0 {
+		errStyle := lipgloss.NewStyle().Foreground(th.Error).Width(indented)
+		b.WriteString("   " + errStyle.Render(
+			fmt.Sprintf("%d search errors", i.Errors),
+		) + "\n")
 	}
-	b.WriteString("\n " + muted.Render("Your imported playlists are in the sidebar now (prefixed with [YT])."))
+	b.WriteString("\n " + muted.Render("Your imported playlists are in the sidebar. Go to the Playlists view to refresh the list."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
 		{"Enter", "run another import"},
 		{"Esc", "back"},
@@ -309,17 +307,17 @@ func (i Import) viewDone(th theme.Theme, width int) string {
 	return b.String()
 }
 
-func (i Import) viewError(th theme.Theme) string {
+func (i Import) viewError(th theme.Theme, w int) string {
 	errStyle := lipgloss.NewStyle().Foreground(th.Error).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted)
+	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
 	msg := "Unknown error"
-	if i.Err != nil {
+	if i.Err != nil && i.Err.Error() != "" {
 		msg = i.Err.Error()
 	}
 	var b strings.Builder
 	b.WriteString(" " + errStyle.Render("✗ Import failed") + "\n\n")
-	b.WriteString(" " + lipgloss.NewStyle().Foreground(th.Fg).Width(66).Render(msg) + "\n\n")
-	b.WriteString(" " + muted.Italic(true).Render("If this keeps happening, check your network and that the device-code approval actually went through."))
+	b.WriteString(" " + lipgloss.NewStyle().Foreground(th.Fg).Width(w).Render(msg) + "\n\n")
+	b.WriteString(" " + muted.Italic(true).Render("If the backend is unreachable, check your network. Press Enter to retry."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
 		{"Enter", "retry"},
 		{"Esc", "back"},

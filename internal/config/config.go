@@ -11,32 +11,22 @@ type SpotifyConfig struct {
 	ClientID string `toml:"client_id"`
 }
 
-// AppleMusicConfig holds the user-supplied values needed for the
-// Apple Music import path. All fields optional — when the developer
-// token or auth page URL are empty, the Import view treats Apple
-// Music as "not configured" and shows setup instructions instead of
-// attempting an auth flow.
-//
-// Why this is in config rather than obtained automatically:
-//   - DeveloperToken is a JWT signed by an Apple Developer private
-//     key (.p8). Generating it requires paid Apple Developer
-//     membership; musicTUI can't do it.
-//   - AuthPageURL is the HTTPS URL where the static MusicKit JS page
-//     (page/apple-auth/index.html) is hosted. User-specific.
-type AppleMusicConfig struct {
-	DeveloperToken string `toml:"developer_token"`
-	AuthPageURL    string `toml:"auth_page_url"`
-	CallbackPort   int    `toml:"callback_port"` // 0 = auto-pick
+// ImportBackendConfig points at a musictui-import deployment. The
+// default empty URL falls back to the public hosted instance —
+// self-hosters set their own URL here to keep their tokens on their
+// own infrastructure.
+type ImportBackendConfig struct {
+	URL string `toml:"url"`
 }
 
 type Config struct {
-	Theme               string           `toml:"theme"`
-	TickRateMs          int              `toml:"tick_rate_ms"`
-	FrameRate           int              `toml:"frame_rate"`
-	Volume              int              `toml:"volume"`
-	CheckDuplicates     bool             `toml:"check_duplicates"`
-	Spotify             SpotifyConfig    `toml:"spotify"`
-	AppleMusic          AppleMusicConfig `toml:"apple_music"`
+	Theme           string              `toml:"theme"`
+	TickRateMs      int                 `toml:"tick_rate_ms"`
+	FrameRate       int                 `toml:"frame_rate"`
+	Volume          int                 `toml:"volume"`
+	CheckDuplicates bool                `toml:"check_duplicates"`
+	Spotify         SpotifyConfig       `toml:"spotify"`
+	ImportBackend   ImportBackendConfig `toml:"import_backend"`
 }
 
 func Default() Config {

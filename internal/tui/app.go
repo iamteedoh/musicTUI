@@ -16,14 +16,13 @@ import (
 
 	"github.com/iamteedoh/musicTUI/internal/audio"
 	"github.com/iamteedoh/musicTUI/internal/config"
+	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/model"
 	"github.com/iamteedoh/musicTUI/internal/mpris"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musicTUI/internal/applemusic"
-	"github.com/iamteedoh/musicTUI/internal/ytmusic"
 )
 
 type App struct {
@@ -49,10 +48,11 @@ type App struct {
 	lyrics   components.Lyrics
 	artwork  components.Artwork
 	settings components.Settings
-	importv  components.Import
-	ytToken  *ytmusic.Token          // current in-memory YT Music token
-	ytDevice *ytmusic.DeviceAuth     // active device-code (cleared after success)
-	amCreds  *applemusic.Credentials // current Apple Music credentials
+	importv         components.Import
+	importClient    *importbackend.Client
+	importSession   *importbackend.Session
+	importEvents    <-chan importbackend.Event // active SSE channel; nil when no import is running
+	importEventsCancel context.CancelFunc      // cancels the SSE goroutine on view exit
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
@@ -116,19 +116,15 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		// First launch with no credentials — walk the user through setup.
 		app.onboard.Start()
 	}
-	// Hydrate YT Music token if present. A prior session might have
-	// authed already; reusing lets the import view skip straight to
-	// the authed stage.
-	if tok, err := ytmusic.LoadToken(); err == nil && tok != nil {
-		app.ytToken = tok
+	// Set up the import-backend client. URL falls back to the public
+	// hosted instance if the user hasn't configured a self-hosted one.
+	app.importClient = importbackend.NewClient(cfg.ImportBackend.URL)
+	app.importv.BackendURL = app.importClient.BackendURL()
+	// Hydrate any cached session so a relaunch after a completed
+	// auth skips straight to library read.
+	if sess, err := importbackend.LoadSession(); err == nil && sess != nil {
+		app.importSession = sess
 	}
-	// Same for Apple Music credentials.
-	if ac, err := applemusic.LoadCredentials(); err == nil && ac != nil {
-		app.amCreds = ac
-	}
-	// Flag whether Apple Music import is ready to use — needs both
-	// developer token and auth page URL configured.
-	app.importv.AppleConfigured = cfg.AppleMusic.DeveloperToken != "" && cfg.AppleMusic.AuthPageURL != ""
 	app.mprisServer = mpris.New() // nil if D-Bus unavailable
 	return app
 }
@@ -345,91 +341,123 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = "Auth error: " + msg.Err.Error()
 		return a, nil
 
-	// YT Music import
-	case YTDeviceCodeMsg:
-		a.ytDevice = msg.Auth
-		a.importv.Stage = components.ImportStageDeviceCode
-		a.importv.UserCode = msg.Auth.UserCode
-		a.importv.VerificationURL = msg.Auth.VerificationURL
-		return a, PollYTAuthCmd(msg.Auth.DeviceCode, msg.Auth.Interval)
-	case YTAuthSuccessMsg:
-		a.ytToken = msg.Token
-		a.ytDevice = nil
-		a.importv.Stage = components.ImportStageAuthed
-		return a, nil
-	case YTAuthErrorMsg:
+	// Import-backend (v0.2.0)
+	case SessionReadyMsg:
+		a.importSession = msg.Session
+		// Move on to checking which services are connected. If both are
+		// already connected (e.g. user re-ran after a successful auth
+		// in a previous launch), we'll skip straight to library read.
+		a.importv.Stage = components.ImportStageAwaitingAuth
+		return a, PollSessionStateCmd(a.importClient, msg.Session.SessionID)
+	case SessionErrorMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
-	case YTLibraryLoadedMsg:
+	case SessionStateMsg:
+		a.importv.YouTubeConnected = msg.State.Services["youtube"]
+		a.importv.SpotifyConnected = msg.State.Services["spotify"]
+		if a.importv.BothConnected() {
+			a.importv.Stage = components.ImportStageLoadingLibrary
+			return a, LoadLibraryFromBackendCmd(a.importClient, a.importSession.SessionID)
+		}
+		// Auto-open the next service that needs auth if we haven't already.
+		next := a.importv.NextServiceToConnect()
+		if next != "" && a.importv.AuthBrowserOpenedFor != next {
+			openBrowser(a.importClient.AuthStartURL(next, a.importSession.SessionID))
+			a.importv.AuthBrowserOpenedFor = next
+		}
+		// Keep polling.
+		return a, PollSessionStateCmd(a.importClient, a.importSession.SessionID)
+	case LibraryLoadedFromBackendMsg:
 		a.importv.Stage = components.ImportStageLibraryLoaded
-		a.importv.Playlists = msg.Playlists
-		a.importv.LikedCount = msg.LikedCount
-		a.importv.Albums = msg.Albums
-		a.importv.Artists = msg.Artists
+		a.importv.Playlists = msg.Library.Playlists
+		a.importv.LikedCount = msg.Library.LikedCount
 		return a, nil
-	case YTLibraryErrorMsg:
+	case LibraryErrorFromBackendMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
-	case YTImportDoneMsg:
-		a.importv.Stage = components.ImportStageDone
-		a.importv.Summaries = msg.Summaries
-		// Refresh the sidebar playlist list to include newly-created
-		// [YT]-prefixed playlists.
-		if a.client != nil {
-			a.playlist.Items = nil
-			return a, FetchPlaylistsCmd(a.client, 0)
-		}
-		return a, nil
-	case YTImportErrorMsg:
+	case ImportStartedMsg:
+		a.importv.JobID = msg.JobID
+		a.importv.Stage = components.ImportStageImporting
+		// Spawn the SSE goroutine and start pumping events into the
+		// BubbleTea event loop one at a time.
+		ctx, cancel := context.WithCancel(context.Background())
+		a.importEventsCancel = cancel
+		a.importEvents = a.importClient.ListenEvents(ctx, a.importSession.SessionID, msg.JobID)
+		return a, ListenImportEventCmd(a.importEvents)
+	case ImportStartErrorMsg:
 		a.importv.Stage = components.ImportStageError
 		a.importv.Err = msg.Err
 		return a, nil
-
-	// Apple Music import
-	case AMAuthSuccessMsg:
-		a.amCreds = msg.Creds
-		a.importv.Stage = components.ImportStageAuthed
-		return a, nil
-	case AMAuthErrorMsg:
-		a.importv.Stage = components.ImportStageError
-		a.importv.Err = msg.Err
-		return a, nil
-	case AMLibraryLoadedMsg:
-		a.importv.Stage = components.ImportStageLibraryLoaded
-		// Convert Apple Music types into the generic slices the view
-		// already renders — the view only reads counts + names, so
-		// re-using the YT Music shape keeps rendering unchanged.
-		a.importv.Playlists = make([]ytmusic.Playlist, len(msg.Playlists))
-		for i, pl := range msg.Playlists {
-			a.importv.Playlists[i] = ytmusic.Playlist{ID: pl.ID, Name: pl.Name, TrackCount: pl.TrackCount}
+	case ImportEventMsg:
+		// Apply event to view state. After applying we re-arm the
+		// listener for the next event unless this one terminated the
+		// stream (job_done / error / stream_error).
+		ev := msg.Event
+		switch ev.Type {
+		case "job_started":
+			// nothing user-visible — the importing view is already showing
+		case "playlist_skipped":
+			// Entire playlist was filtered out as non-music. Bump the
+			// overall counter so the denominator stays accurate, but
+			// don't advance "current playlist" display.
+			a.importv.ProgressOverallTotal++
+		case "playlist_started":
+			a.importv.ProgressCurrentPlaylist = ev.Str("name")
+			a.importv.ProgressDone = 0
+			a.importv.ProgressTotal = ev.Int("total")
+			a.importv.ProgressOverall++
+			if a.importv.ProgressOverall > a.importv.ProgressOverallTotal {
+				a.importv.ProgressOverallTotal = a.importv.ProgressOverall
+			}
+		case "track_matched":
+			a.importv.ProgressDone = ev.Int("index")
+			a.importv.ProgressTotal = ev.Int("total")
+			a.importv.Matched++
+		case "track_unmatched":
+			a.importv.ProgressDone = ev.Int("index")
+			a.importv.ProgressTotal = ev.Int("total")
+			if reason := ev.Str("reason"); strings.HasPrefix(reason, "search failed") {
+				a.importv.Errors++
+			} else {
+				a.importv.Unmatched++
+			}
+		case "playlist_done":
+			a.importv.JobURL = ev.Str("url")
+		case "job_done":
+			a.importv.Stage = components.ImportStageDone
+			a.importv.ProgressOverallTotal = ev.Int("playlists")
+			if a.importEventsCancel != nil {
+				a.importEventsCancel()
+				a.importEventsCancel = nil
+			}
+			a.importEvents = nil
+			// Refresh the sidebar so the new [YT] playlists show up.
+			if a.client != nil {
+				a.playlist.Items = nil
+				return a, FetchPlaylistsCmd(a.client, 0)
+			}
+			return a, nil
+		case "error", "stream_error":
+			a.importv.Stage = components.ImportStageError
+			a.importv.Err = fmt.Errorf("%s", ev.Str("message"))
+			if a.importEventsCancel != nil {
+				a.importEventsCancel()
+				a.importEventsCancel = nil
+			}
+			a.importEvents = nil
+			return a, nil
 		}
-		a.importv.LikedCount = msg.LikedCount
-		a.importv.Albums = make([]ytmusic.Album, len(msg.Albums))
-		for i, al := range msg.Albums {
-			a.importv.Albums[i] = ytmusic.Album{BrowseID: al.ID, Name: al.Name, Artists: al.Artists, Year: al.Year}
+		return a, ListenImportEventCmd(a.importEvents)
+	case ImportStreamClosedMsg:
+		// Stream closed without a terminal event — probably a network
+		// drop. If we're still in the importing stage, fall back to the
+		// REST job endpoint so the user sees a final state.
+		if a.importv.Stage == components.ImportStageImporting {
+			a.importv.Stage = components.ImportStageError
+			a.importv.Err = fmt.Errorf("import stream closed unexpectedly — check the backend or try again")
 		}
-		a.importv.Artists = make([]ytmusic.Artist, len(msg.Artists))
-		for i, ar := range msg.Artists {
-			a.importv.Artists[i] = ytmusic.Artist{ChannelID: ar.ID, Name: ar.Name}
-		}
-		return a, nil
-	case AMLibraryErrorMsg:
-		a.importv.Stage = components.ImportStageError
-		a.importv.Err = msg.Err
-		return a, nil
-	case AMImportDoneMsg:
-		a.importv.Stage = components.ImportStageDone
-		a.importv.Summaries = msg.Summaries
-		if a.client != nil {
-			a.playlist.Items = nil
-			return a, FetchPlaylistsCmd(a.client, 0)
-		}
-		return a, nil
-	case AMImportErrorMsg:
-		a.importv.Stage = components.ImportStageError
-		a.importv.Err = msg.Err
 		return a, nil
 
 	// Self-update
@@ -979,6 +1007,15 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Some views take over the entire center panel and should receive
+	// keys regardless of whether the sidebar is focused — otherwise
+	// reaching them via the sidebar (where focus stays on Sidebar)
+	// leaves Esc and j/k unrouted.
+	switch a.view {
+	case model.ViewHelp, model.ViewImport:
+		return a.handleContentKey(msg)
+	}
+
 	switch a.focus {
 	case model.FocusSidebar:
 		return a.handleNavKey(msg)
@@ -1309,14 +1346,38 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case model.ViewImport:
 		switch msg.String() {
-		case "j", "down":
-			a.importv.SelectDown()
-		case "k", "up":
-			a.importv.SelectUp()
 		case "enter":
+			// Enter on the sidebar moves focus to content; Enter on
+			// content runs the import state machine.
+			if a.focus == model.FocusSidebar {
+				a.focus = model.FocusContent
+				return a, nil
+			}
 			return a.handleImportEnter()
+		case "r":
+			// Re-open the browser for whichever service still needs auth.
+			if a.importv.Stage == components.ImportStageAwaitingAuth && a.importSession != nil {
+				if next := a.importv.NextServiceToConnect(); next != "" {
+					openBrowser(a.importClient.AuthStartURL(next, a.importSession.SessionID))
+					a.importv.AuthBrowserOpenedFor = next
+				}
+			}
 		case "esc", "h":
+			// Cancel any active SSE stream when leaving the view so the
+			// goroutine cleans up — events can resume on re-entry via
+			// the cached session + GET /jobs/{id} fallback.
+			if a.importEventsCancel != nil {
+				a.importEventsCancel()
+				a.importEventsCancel = nil
+				a.importEvents = nil
+			}
 			a.focus = model.FocusSidebar
+		case "j", "down", "k", "up":
+			// No in-view list to scroll through — delegate to the
+			// sidebar so the user can still move to other views. This
+			// is important because handleKey special-routes ViewImport
+			// to handleContentKey even when focus is on the sidebar.
+			return a.handleNavKey(msg)
 		}
 	case model.ViewHelp:
 		switch msg.String() {
@@ -1533,94 +1594,45 @@ func (a App) handleRightKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handleImportEnter drives the Import view state machine on Enter
-// presses. Each stage advances to the next appropriate command or
-// terminal state; the selected source (YT / Apple) determines which
-// command runs at each step.
+// handleImportEnter drives the Import view's state machine on Enter
+// presses. The flow is linear (no source picker — first release is YT
+// Music → Spotify only): Idle → EnsuringSession → AwaitingAuth →
+// LoadingLibrary → LibraryLoaded → Importing → Done/Error.
 func (a App) handleImportEnter() (tea.Model, tea.Cmd) {
 	switch a.importv.Stage {
 	case components.ImportStageIdle:
-		// Lock in the selected source and kick off its auth path.
-		switch a.importv.Selected {
-		case 0:
-			a.importv.Source = components.SourceYT
-		case 1:
-			a.importv.Source = components.SourceApple
-		}
-		if a.importv.Source == components.SourceApple && !a.importv.AppleConfigured {
-			a.importv.Err = fmt.Errorf("Apple Music is not configured. See the README's 'Apple Music Setup' section for the one-time steps (Apple Developer token + auth page URL).")
-			a.importv.Stage = components.ImportStageError
-			return a, nil
-		}
-		// If we already have valid creds for this source, skip auth.
-		switch a.importv.Source {
-		case components.SourceYT:
-			if a.ytToken != nil && a.ytToken.Valid() {
-				a.importv.Stage = components.ImportStageAuthed
-				return a, nil
-			}
-			a.importv.Stage = components.ImportStageDeviceCode
-			a.importv.UserCode = "loading..."
-			return a, StartYTDeviceAuthCmd()
-		case components.SourceApple:
-			if a.amCreds != nil && a.amCreds.MusicUserToken != "" {
-				a.importv.Stage = components.ImportStageAuthed
-				return a, nil
-			}
-			a.importv.Stage = components.ImportStageDeviceCode
-			a.importv.UserCode = "browser opening..."
-			a.importv.VerificationURL = a.config.AppleMusic.AuthPageURL
-			return a, StartAMAuthCmd(a.config.AppleMusic.AuthPageURL,
-				a.config.AppleMusic.DeveloperToken,
-				a.config.AppleMusic.CallbackPort)
-		}
+		a.importv.Stage = components.ImportStageEnsuringSession
+		return a, EnsureBackendSessionCmd(a.importClient)
 	case components.ImportStageError:
+		// Cancel any leftover SSE stream before resetting.
+		if a.importEventsCancel != nil {
+			a.importEventsCancel()
+			a.importEventsCancel = nil
+			a.importEvents = nil
+		}
 		a.importv.Reset()
 		return a, nil
-	case components.ImportStageAuthed:
-		a.importv.Stage = components.ImportStageLoadingLibrary
-		switch a.importv.Source {
-		case components.SourceYT:
-			if a.ytToken == nil {
-				return a, nil
-			}
-			return a, LoadYTLibraryCmd(a.ytToken)
-		case components.SourceApple:
-			if a.amCreds == nil {
-				return a, nil
-			}
-			return a, LoadAMLibraryCmd(a.amCreds)
-		}
 	case components.ImportStageLibraryLoaded:
-		if a.client == nil {
-			a.importv.Err = fmt.Errorf("Spotify client not ready — log in first")
-			a.importv.Stage = components.ImportStageError
-			return a, nil
-		}
-		a.importv.Stage = components.ImportStageImporting
-		a.importv.ProgressOverallTotal = len(a.importv.Playlists) + 1
-		switch a.importv.Source {
-		case components.SourceYT:
-			return a, RunYTImportCmd(a.ytToken, a.client)
-		case components.SourceApple:
-			return a, RunAMImportCmd(a.amCreds, a.client)
-		}
+		return a, StartImportCmd(
+			a.importClient,
+			a.importSession.SessionID,
+			a.importSession.CSRFToken,
+			false, // include_liked — Liked Videos are rarely music, skip
+		)
 	case components.ImportStageDone:
-		// Reset and go back to the authed stage of the same source.
-		savedSource := a.importv.Source
-		a.importv.Reset()
-		a.importv.Source = savedSource
-		switch savedSource {
-		case components.SourceYT:
-			if a.ytToken != nil && a.ytToken.Valid() {
-				a.importv.Stage = components.ImportStageAuthed
-			}
-		case components.SourceApple:
-			if a.amCreds != nil && a.amCreds.MusicUserToken != "" {
-				a.importv.Stage = components.ImportStageAuthed
-			}
-		}
-		return a, nil
+		// Run another import — back to library-loaded so the user can
+		// confirm before kicking another job (and the library may have
+		// changed since last time).
+		a.importv.ProgressOverall = 0
+		a.importv.ProgressOverallTotal = 0
+		a.importv.ProgressDone = 0
+		a.importv.ProgressTotal = 0
+		a.importv.Matched = 0
+		a.importv.Unmatched = 0
+		a.importv.Errors = 0
+		a.importv.JobURL = ""
+		a.importv.Stage = components.ImportStageLoadingLibrary
+		return a, LoadLibraryFromBackendCmd(a.importClient, a.importSession.SessionID)
 	}
 	return a, nil
 }
