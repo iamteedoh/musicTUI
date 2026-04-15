@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -257,6 +259,30 @@ func (a App) startInteractiveAuthCmd() tea.Cmd {
 
 // openBrowser attempts to open the given URL in the user's default browser.
 // Failures are silent — the URL is also surfaced in the UI as a fallback.
+// appendImportLog writes a timestamped line to
+// ~/.config/musicTUI/import/last-run.log so we can diagnose import
+// failures after the fact (TUI alone can only show a few summary
+// lines; the full log has everything). Best-effort — if we can't
+// write, we silently drop.
+func appendImportLog(format string, args ...any) {
+	dir, err := config.ConfigDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, "import", "last-run.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	line := time.Now().UTC().Format("2006-01-02T15:04:05Z") + " " +
+		fmt.Sprintf(format, args...) + "\n"
+	_, _ = f.WriteString(line)
+}
+
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -474,6 +500,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// just the underlying error (e.g. the Spotify 429 body).
 				reason := strings.TrimPrefix(ev.TrackReason, "search failed: ")
 				a.importv.ErrorReasons[reason]++
+				appendImportLog("search failed for %s — %s: %s",
+					ev.TrackTitle, ev.TrackArtist, reason)
 			} else {
 				a.importv.Unmatched++
 			}
@@ -506,6 +534,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.importv.ErrorReasons[ev.Message]++
 			a.importv.Errors++
 			a.importv.Err = fmt.Errorf("%s", ev.Message)
+			appendImportLog("error: %s", ev.Message)
 		}
 		return a, ListenImportEventCmd(a.importEvents)
 	case ImportStreamClosedMsg:

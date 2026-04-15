@@ -296,6 +296,16 @@ func (i Import) viewImporting(th theme.Theme, width int) string {
 	b.WriteString("\n\n " + dim.Render(
 		fmt.Sprintf("running tally — matched: %d  unmatched: %d  errors: %d",
 			i.Matched, i.Unmatched, i.Errors)))
+	// Show the most recent / most common error mid-import so the user
+	// can tell whether to let it run or Esc out and investigate. 100%
+	// error rate in the first dozen tracks almost always means
+	// something structural (auth, scopes, app config), not transient.
+	if i.Errors > 0 {
+		errStyle := lipgloss.NewStyle().Foreground(th.Error).Width(w)
+		if top := i.topErrorReasons(1); len(top) > 0 {
+			b.WriteString("\n\n " + errStyle.Render("⚠ "+top[0]))
+		}
+	}
 	return b.String()
 }
 
