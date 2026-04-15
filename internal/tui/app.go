@@ -467,6 +467,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.importv.ProgressTotal = ev.PlaylistTotal
 			if strings.HasPrefix(ev.TrackReason, "search failed") {
 				a.importv.Errors++
+				if a.importv.ErrorReasons == nil {
+					a.importv.ErrorReasons = map[string]int{}
+				}
+				// Strip the "search failed: " prefix for display, leaving
+				// just the underlying error (e.g. the Spotify 429 body).
+				reason := strings.TrimPrefix(ev.TrackReason, "search failed: ")
+				a.importv.ErrorReasons[reason]++
 			} else {
 				a.importv.Unmatched++
 			}
@@ -486,20 +493,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		case importer.EventError:
-			a.importv.Stage = components.ImportStageError
-			a.importv.Err = fmt.Errorf("%s", ev.Message)
-			if a.importEventsCancel != nil {
-				a.importEventsCancel()
-				a.importEventsCancel = nil
+			// The importer emits EventError for both fatal and
+			// non-fatal failures (bad create, bad add, bad whoami,
+			// etc.). A fatal one closes the event stream right
+			// after; a non-fatal one keeps going. We record the
+			// message regardless so the Done screen shows it, and
+			// stash it on Err so ImportStreamClosedMsg can surface
+			// the actual reason if the job does terminate.
+			if a.importv.ErrorReasons == nil {
+				a.importv.ErrorReasons = map[string]int{}
 			}
-			a.importEvents = nil
-			return a, nil
+			a.importv.ErrorReasons[ev.Message]++
+			a.importv.Errors++
+			a.importv.Err = fmt.Errorf("%s", ev.Message)
 		}
 		return a, ListenImportEventCmd(a.importEvents)
 	case ImportStreamClosedMsg:
 		if a.importv.Stage == components.ImportStageImporting {
 			a.importv.Stage = components.ImportStageError
-			a.importv.Err = fmt.Errorf("import event stream closed unexpectedly")
+			// Preserve the last EventError we saw (set by the case
+			// above) — that's the real reason the worker bailed. If
+			// we never received one, fall back to a generic message.
+			if a.importv.Err == nil {
+				a.importv.Err = fmt.Errorf("import event stream closed unexpectedly")
+			}
 		}
 		return a, nil
 

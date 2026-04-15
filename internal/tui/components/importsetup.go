@@ -2,6 +2,7 @@ package components
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/iamteedoh/musicTUI/internal/theme"
@@ -39,7 +40,11 @@ type ImportSetup struct {
 
 	// Which of the two fields the cursor is on (0 = top, 1 = bottom).
 	// Used by steps 6 (two fields) and 8 (one field — Field always 0).
-	Field     int
+	Field int
+	// CursorPos is a RUNE index into the active field. Rune units (not
+	// bytes) so the cursor math stays correct when pasted content
+	// contains multi-byte UTF-8, and so the mask rendering (which
+	// substitutes one `•` per rune) aligns with the cursor.
 	CursorPos int
 }
 
@@ -125,11 +130,13 @@ func (w *ImportSetup) SwitchField() {
 	}
 	w.Field = (w.Field + 1) % n
 	if af := w.activeField(); af != nil {
-		w.CursorPos = len(*af)
+		w.CursorPos = utf8.RuneCountInString(*af)
 	}
 }
 
-// InputChar inserts a character at the cursor on input steps.
+// InputChar inserts a character at the cursor on input steps. All
+// string math is rune-based: CursorPos counts runes, not bytes, so
+// multi-byte UTF-8 pastes insert cleanly.
 func (w *ImportSetup) InputChar(r rune) {
 	if !w.IsInputStep() {
 		return
@@ -138,15 +145,16 @@ func (w *ImportSetup) InputChar(r rune) {
 	if field == nil {
 		return
 	}
-	val := *field
-	if w.CursorPos > len(val) {
-		w.CursorPos = len(val)
+	rs := []rune(*field)
+	if w.CursorPos > len(rs) {
+		w.CursorPos = len(rs)
 	}
-	*field = val[:w.CursorPos] + string(r) + val[w.CursorPos:]
-	w.CursorPos += len(string(r))
+	rs = append(rs[:w.CursorPos], append([]rune{r}, rs[w.CursorPos:]...)...)
+	*field = string(rs)
+	w.CursorPos++
 }
 
-// Backspace removes the character left of the cursor.
+// Backspace removes the rune left of the cursor.
 func (w *ImportSetup) Backspace() {
 	if !w.IsInputStep() {
 		return
@@ -155,8 +163,12 @@ func (w *ImportSetup) Backspace() {
 	if field == nil || w.CursorPos == 0 {
 		return
 	}
-	val := *field
-	*field = val[:w.CursorPos-1] + val[w.CursorPos:]
+	rs := []rune(*field)
+	if w.CursorPos > len(rs) {
+		w.CursorPos = len(rs)
+	}
+	rs = append(rs[:w.CursorPos-1], rs[w.CursorPos:]...)
+	*field = string(rs)
 	w.CursorPos--
 }
 
@@ -371,17 +383,27 @@ func (w ImportSetup) viewGoogleConsent(th theme.Theme) string {
 	b.WriteString(muted.Render("Press O to open:"))
 	b.WriteString("\n  " + accent.Render(w.URLForStep()))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Fill in:"))
-	b.WriteString("\n  • " + body.Render("User type: External"))
-	b.WriteString("\n  • " + body.Render("App name: anything (e.g. \"musicTUI Import\")"))
-	b.WriteString("\n  • " + body.Render("User support email: your email"))
-	b.WriteString("\n  • " + body.Render("Developer contact: your email"))
+	b.WriteString(body.Render("Click the \"Get started\" button, then walk through"))
+	b.WriteString("\n" + body.Render("Google's 4-step mini-wizard:"))
 	b.WriteString("\n\n")
-	b.WriteString(warn.Render("⚠ Important: in the Audience section, add your own"))
-	b.WriteString("\n" + warn.Render("  Gmail address as a Test User. Without this, sign-in"))
-	b.WriteString("\n" + warn.Render("  will be blocked with an \"Access blocked\" error."))
+	b.WriteString(body.Render("  1. App Information:"))
+	b.WriteString("\n     • App name: musicTUI Import")
+	b.WriteString("\n     • User support email: your Gmail")
+	b.WriteString("\n     → Next")
+	b.WriteString("\n  2. Audience:")
+	b.WriteString("\n     • Select External")
+	b.WriteString("\n     → Next")
+	b.WriteString("\n  3. Contact Information:")
+	b.WriteString("\n     • Email addresses: your Gmail")
+	b.WriteString("\n     → Next")
+	b.WriteString("\n  4. Finish:")
+	b.WriteString("\n     • ☑ Agree to Google API Services User Data Policy")
+	b.WriteString("\n     → Continue → Create")
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Skip the Scopes step. Save."))
+	b.WriteString(warn.Render("⚠ After creation, click the \"Audience\" tab and add"))
+	b.WriteString("\n" + warn.Render("  your Gmail under \"Test users\" — or sign-in will"))
+	b.WriteString("\n" + warn.Render("  be blocked with an \"Access blocked\" error."))
+	_ = muted
 	return b.String()
 }
 
@@ -399,7 +421,7 @@ func (w ImportSetup) viewGoogleCreateOAuth(th theme.Theme) string {
 	b.WriteString(body.Render("Click Create Credentials → OAuth client ID:"))
 	b.WriteString("\n  • " + body.Render("Application type: Web application"))
 	b.WriteString("\n  • " + body.Render("Name: musicTUI Import"))
-	b.WriteString("\n  • " + body.Render("Authorised redirect URI:"))
+	b.WriteString("\n  • " + body.Render("Authorized redirect URI:"))
 	b.WriteString("\n      " + accent.Render("http://127.0.0.1:8889/callback"))
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("Click Create. A popup shows your Client ID and Client Secret — keep it open for the next step."))
@@ -428,18 +450,23 @@ func (w ImportSetup) viewSpotifyRedirect(th theme.Theme) string {
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	good := lipgloss.NewStyle().Foreground(th.Success)
 	var b strings.Builder
-	b.WriteString(accent.Render("Spotify — Verify Redirect URI") + "\n")
-	b.WriteString(body.Render("musicTUI's playback uses port 8888. Import reuses the same redirect URI, so you usually don't need to change anything."))
+	b.WriteString(accent.Render("Spotify — Verify Your Existing App") + "\n")
+	b.WriteString(body.Render("You already created a Spotify Developer app during the first-run playback setup. Import reuses that same app — no need to create a second one."))
 	b.WriteString("\n\n")
 	b.WriteString(muted.Render("Press O to open:"))
 	b.WriteString("\n  " + accent.Render(w.URLForStep()))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Click your existing musicTUI app → Settings → Edit. Confirm this URI is in Redirect URIs:"))
-	b.WriteString("\n  " + good.Render("✓ http://127.0.0.1:8888/callback"))
+	b.WriteString(body.Render("Click your existing musicTUI app → Settings → Edit. Two things to confirm:"))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("If it's missing, add it and click Save."))
+	b.WriteString(body.Render("  1. Redirect URIs includes:"))
+	b.WriteString("\n     " + good.Render("✓ http://127.0.0.1:8888/callback"))
+	b.WriteString("\n     " + muted.Render("(This is the same port playback uses, so it"))
+	b.WriteString("\n     " + muted.Render(" should already be there.)"))
 	b.WriteString("\n\n")
-	b.WriteString(muted.Render("Also: confirm your Spotify account is listed under User Management on the same app — required for write operations like creating playlists."))
+	b.WriteString(body.Render("  2. Under User Management, your Spotify account is"))
+	b.WriteString("\n     " + body.Render("listed as a user — required for playlist creation."))
+	b.WriteString("\n\n")
+	b.WriteString(body.Render("If anything's missing, add it and click Save."))
 	return b.String()
 }
 
@@ -464,40 +491,61 @@ func (w ImportSetup) viewDone(th theme.Theme) string {
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(64)
 	good := lipgloss.NewStyle().Foreground(th.Success).Bold(true)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
+	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
 	var b strings.Builder
 	b.WriteString(good.Render("✓ Setup complete"))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Your credentials are saved at:"))
-	b.WriteString("\n  " + muted.Render("~/.config/musicTUI/config.toml  (under [import])"))
+	b.WriteString(body.Render("Credentials saved to ~/.config/musicTUI/config.toml."))
+	b.WriteString("\n" + body.Render("OAuth tokens will be encrypted and stored at"))
+	b.WriteString("\n" + muted.Render("~/.config/musicTUI/import/") + ".")
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("OAuth tokens (from sign-in) will be encrypted and stored at:"))
-	b.WriteString("\n  " + muted.Render("~/.config/musicTUI/import/"))
+	b.WriteString(accent.Render("Heads-up on the Google sign-in screen:") + "\n")
+	b.WriteString(body.Render("When you start the import, your browser will open a Google sign-in page that may say:"))
+	b.WriteString("\n\n   " + warn.Render("\"Google hasn't verified this app\""))
 	b.WriteString("\n\n")
-	b.WriteString(accent.Render("What happens next:"))
-	b.WriteString("\n")
-	b.WriteString(body.Render("Press Enter to return to the Import view. Then Enter again to start the import — your browser will open for YouTube and then Spotify sign-in."))
+	b.WriteString(body.Render("That's expected — you are the developer of the app you just created. Click the small"))
+	b.WriteString(" " + accent.Render("Continue") + " " + body.Render("link (not \"Back to safety\"), then approve the YouTube permissions. Google shows this to anyone running an unverified app; it's only a warning, not a block."))
+	b.WriteString("\n\n")
+	b.WriteString(accent.Render("What happens next:") + "\n")
+	b.WriteString(body.Render("Press Enter to return to the Import view. Then Enter again to start the import — browser opens for YouTube first, then Spotify."))
 	return b.String()
 }
 
 // renderField draws a single labeled text-input box. Active=true
 // shows the cursor; secret=true masks the typed characters.
+//
+// All string indexing is rune-aware so the masked secret display (one
+// `•` per input rune) aligns with CursorPos (which is also in rune
+// units). A byte-based slice here was a bug — it cut multi-byte UTF-8
+// characters mid-sequence and produced garbled output in the box.
 func (w ImportSetup) renderField(label, value string, active, secret bool, th theme.Theme) string {
 	labelStyle := lipgloss.NewStyle().Foreground(th.FgMuted)
-	display := value
+
+	var displayRunes []rune
 	if secret {
-		display = strings.Repeat("•", len(value))
+		displayRunes = make([]rune, utf8.RuneCountInString(value))
+		for i := range displayRunes {
+			displayRunes[i] = '*'
+		}
+	} else {
+		displayRunes = []rune(value)
 	}
+
+	var display string
 	if active {
 		pos := w.CursorPos
-		if pos > len(display) {
-			pos = len(display)
+		if pos > len(displayRunes) {
+			pos = len(displayRunes)
 		}
 		cursor := lipgloss.NewStyle().Background(th.Accent).Render(" ")
-		display = display[:pos] + cursor + display[pos:]
-		if value == "" {
+		display = string(displayRunes[:pos]) + cursor + string(displayRunes[pos:])
+		if len(displayRunes) == 0 {
 			display = cursor
 		}
+	} else {
+		display = string(displayRunes)
 	}
+
 	border := th.Border
 	if active {
 		border = th.Accent

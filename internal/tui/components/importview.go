@@ -68,6 +68,12 @@ type Import struct {
 	Errors    int
 	JobURL    string // open.spotify.com URL of the most-recent created playlist (last seen)
 
+	// ErrorReasons counts each distinct error message seen during the
+	// import. Displayed on the Done screen so users can see what
+	// actually went wrong (e.g. "spotify: ... 429: API rate limit
+	// exceeded") rather than just a blind number.
+	ErrorReasons map[string]int
+
 	Err error
 }
 
@@ -118,7 +124,7 @@ func (i Import) View(th theme.Theme, width, height int) string {
 	title := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).
 		Render("Import from YouTube Music")
 	sub := wrap.Foreground(th.FgMuted).Italic(true).
-		Render("Server-mediated transfer into Spotify.")
+		Render("Local transfer into Spotify.")
 
 	var body string
 	switch i.Stage {
@@ -321,6 +327,15 @@ func (i Import) viewDone(th theme.Theme, width int) string {
 		b.WriteString("   " + errStyle.Render(
 			fmt.Sprintf("%d search errors", i.Errors),
 		) + "\n")
+		// Show the top error reasons so users can tell whether it's
+		// something they should act on (rate limiting, token expiry,
+		// actually bad data) rather than a mystery number.
+		if top := i.topErrorReasons(3); len(top) > 0 {
+			b.WriteString("\n " + muted.Render("Most common causes:") + "\n")
+			for _, line := range top {
+				b.WriteString("   " + muted.Render("• "+line) + "\n")
+			}
+		}
 	}
 	b.WriteString("\n " + muted.Render("Your imported playlists are in the sidebar. Go to the Playlists view to refresh the list."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
@@ -349,6 +364,40 @@ func (i Import) viewError(th theme.Theme, w int) string {
 }
 
 // ─────────────────── helpers ───────────────────
+
+// topErrorReasons returns up to `limit` error strings ordered by
+// frequency (most common first). Each string is truncated and has
+// its count suffixed so the Done screen shows, e.g.:
+//
+//	• 429: API rate limit exceeded  (174x)
+func (i Import) topErrorReasons(limit int) []string {
+	if len(i.ErrorReasons) == 0 {
+		return nil
+	}
+	type pair struct {
+		reason string
+		count  int
+	}
+	all := make([]pair, 0, len(i.ErrorReasons))
+	for r, c := range i.ErrorReasons {
+		all = append(all, pair{r, c})
+	}
+	// Simple insertion-sort by count desc; set never gets large.
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && all[j].count > all[j-1].count; j-- {
+			all[j], all[j-1] = all[j-1], all[j]
+		}
+	}
+	out := make([]string, 0, limit)
+	for k := 0; k < len(all) && k < limit; k++ {
+		r := all[k].reason
+		if len(r) > 70 {
+			r = r[:69] + "…"
+		}
+		out = append(out, fmt.Sprintf("%s  (%d×)", r, all[k].count))
+	}
+	return out
+}
 
 func renderProgressBar(th theme.Theme, done, total, width int) string {
 	if width < 10 {
