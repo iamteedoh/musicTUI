@@ -32,8 +32,10 @@ type bridgeEvent struct {
 	Bass       *float32  `json:"bass,omitempty"`
 	Mids       *float32  `json:"mids,omitempty"`
 	Highs      *float32  `json:"highs,omitempty"`
-	Energy     *float32  `json:"energy,omitempty"`
-	Beat       *bool     `json:"beat,omitempty"`
+	Energy        *float32 `json:"energy,omitempty"`
+	Beat          *bool    `json:"beat,omitempty"`
+	BeatIntensity *float32 `json:"beat_intensity,omitempty"`
+	Bpm           *float32 `json:"bpm,omitempty"`
 }
 
 // Event is sent from the engine to the TUI.
@@ -67,9 +69,9 @@ type Engine struct {
 	logBytes  int64
 	logCapped bool
 
-	// Spectrum analysis
+	// Spectrum analysis. Spectrum is populated from the Rust bridge's FFT
+	// thread via the "spectrum" events in readEvents — there is no Go-side FFT.
 	Spectrum *SharedSpectrum
-	analyzer *Analyzer
 }
 
 // LogPath returns the path where bridge stderr is captured.
@@ -90,7 +92,6 @@ func NewEngine(bridgePath, token string) *Engine {
 		token:      token,
 		events:     make(chan Event, 64),
 		Spectrum:   spectrum,
-		analyzer:   NewAnalyzer(spectrum),
 	}
 	e.volume.Store(75)
 	return e
@@ -236,6 +237,12 @@ func (e *Engine) readEvents(r io.Reader) {
 				}
 				if ev.Beat != nil {
 					data.Beat = *ev.Beat
+				}
+				if ev.BeatIntensity != nil {
+					data.BeatIntensity = *ev.BeatIntensity
+				}
+				if ev.Bpm != nil {
+					data.BPM = *ev.Bpm
 				}
 				e.Spectrum.Write(data)
 			}

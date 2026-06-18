@@ -20,6 +20,11 @@ type SpectrumData struct {
 	LeftEnergy  float32
 	RightEnergy float32
 	Beat        bool
+	// BeatIntensity is a continuous beat envelope (0..1): spikes to 1.0 on an
+	// onset and decays, for smooth beat-reactive rendering.
+	BeatIntensity float32
+	// BPM is the estimated tempo (0 until enough onsets are seen).
+	BPM float32
 }
 
 // SharedSpectrum provides thread-safe access to spectrum data.

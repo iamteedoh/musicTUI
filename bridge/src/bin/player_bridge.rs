@@ -60,6 +60,10 @@ struct EventOut {
     energy: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     beat: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beat_intensity: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bpm: Option<f32>,
 }
 
 fn emit(ev: EventOut) {
@@ -103,8 +107,11 @@ async fn main() {
     let mut event_rx: Option<mpsc::UnboundedReceiver<AudioEvent>> = None;
     let mut spectrum: Option<Arc<RwLock<SpectrumData>>> = None;
 
-    // Spectrum at 10Hz
-    let mut spectrum_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    // Spectrum at ~60Hz. The FFT thread analyses at ~172Hz; emitting at 60Hz
+    // gives the renderer smooth, beat-accurate motion (10Hz aliased away every
+    // transient). Spectrum frames are no longer mirrored to the debug log, so
+    // this rate doesn't bloat it.
+    let mut spectrum_interval = tokio::time::interval(tokio::time::Duration::from_millis(16));
 
     loop {
         tokio::select! {
@@ -120,6 +127,8 @@ async fn main() {
                             highs: Some(data.bands.highs),
                             energy: Some(data.energy),
                             beat: Some(data.beat),
+                            beat_intensity: Some(data.beat_intensity),
+                            bpm: Some(data.bpm),
                             ..Default::default()
                         });
                     }
@@ -201,6 +210,8 @@ impl Default for EventOut {
             highs: None,
             energy: None,
             beat: None,
+            beat_intensity: None,
+            bpm: None,
         }
     }
 }

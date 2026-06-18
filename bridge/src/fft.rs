@@ -17,10 +17,26 @@ const HOP_SIZE: usize = 256;
 const NUM_BINS: usize = 128;
 const WAVEFORM_SIZE: usize = 512;
 const PEAK_DECAY: f32 = 0.99;
-const BEAT_THRESHOLD: f32 = 1.4;
-const BEAT_HISTORY_LEN: usize = 172;
 const BIN_SMOOTH: f32 = 0.65; // EMA alpha — fast response, let visualizers add their own smoothing
 const LR_SMOOTH: f32 = 0.45;
+
+// ── Beat / onset detection (spectral flux on low frequencies) ────────────
+// The FFT thread runs at the hop rate: 44100 / HOP_SIZE ≈ 172 frames/sec.
+const FRAMES_PER_SEC: f32 = 44100.0 / HOP_SIZE as f32;
+// Bins (of NUM_BINS log-spaced bins) to watch for onsets. The low-frequency
+// region carries kick/snare transients that define the beat.
+const FLUX_BASS_BINS: usize = 24;
+// Rolling window for the adaptive threshold (~300 ms of flux history).
+const FLUX_HISTORY_LEN: usize = 52;
+// Threshold = mean + K * stddev of recent flux. Higher K = fewer, surer beats.
+const FLUX_THRESHOLD_K: f32 = 1.6;
+// Absolute floor so silence/near-silence never triggers.
+const FLUX_MIN: f32 = 0.02;
+// Beat envelope decay per frame (~0.90 → pulse fades over ~90 ms).
+const BEAT_DECAY: f32 = 0.90;
+// Refractory period: ignore new onsets for ~110 ms after one fires, so a single
+// hit can't double-trigger (caps detected tempo around 500 BPM).
+const REFRACTORY_FRAMES: usize = (0.11 * FRAMES_PER_SEC) as usize;
 
 /// Audio output buffer compensation delay in samples.
 /// Set to 0 for no delay. Increase if viz appears ahead of audio.
@@ -49,7 +65,15 @@ pub fn spawn_fft_thread(
         let mut samples_since_fft: usize = 0;
 
         let mut peaks = vec![0.0f32; NUM_BINS];
-        let mut energy_history: Vec<f32> = Vec::with_capacity(BEAT_HISTORY_LEN);
+
+        // Beat/onset detection state (spectral flux on the low-frequency bins).
+        let mut prev_bass = vec![0.0f32; FLUX_BASS_BINS];
+        let mut flux_history: VecDeque<f32> = VecDeque::with_capacity(FLUX_HISTORY_LEN);
+        let mut beat_envelope: f32 = 0.0;
+        let mut refractory: usize = 0;
+        let mut frames_since_onset: u32 = 0;
+        let mut recent_intervals: VecDeque<f32> = VecDeque::with_capacity(8); // seconds between onsets
+        let mut smooth_bpm: f32 = 0.0;
 
         // Persistent smoothed output — the key to eliminating jitter
         let mut smooth_bins = vec![0.0f32; NUM_BINS];
@@ -183,18 +207,81 @@ pub fn spawn_fft_thread(
                     / NUM_BINS as f32)
                     .sqrt();
 
-                // Beat detection
-                if energy_history.len() >= BEAT_HISTORY_LEN {
-                    energy_history.remove(0);
+                // ── Beat / onset detection ──────────────────────────────
+                // Spectral flux: sum of positive frame-to-frame increases in
+                // the low-frequency bins (kick/snare transients). Computed on
+                // the pre-smoothed dB bins so attacks stay sharp.
+                let mut flux = 0.0f32;
+                for i in 0..FLUX_BASS_BINS {
+                    let diff = bins[i] - prev_bass[i];
+                    if diff > 0.0 {
+                        flux += diff;
+                    }
+                    prev_bass[i] = bins[i];
                 }
-                energy_history.push(energy);
-                let avg_energy = if energy_history.is_empty() {
-                    0.0
+
+                // Adaptive threshold from recent flux: mean + K * stddev.
+                let (mean, std) = if flux_history.is_empty() {
+                    (0.0, 0.0)
                 } else {
-                    energy_history.iter().sum::<f32>() / energy_history.len() as f32
+                    let n = flux_history.len() as f32;
+                    let m = flux_history.iter().sum::<f32>() / n;
+                    let var =
+                        flux_history.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / n;
+                    (m, var.sqrt())
                 };
-                let beat =
-                    energy > avg_energy * BEAT_THRESHOLD && avg_energy > 0.01;
+                let threshold = mean + FLUX_THRESHOLD_K * std;
+
+                let mut beat = false;
+                if refractory == 0 && flux > FLUX_MIN && flux > threshold {
+                    beat = true;
+                    beat_envelope = 1.0;
+                    refractory = REFRACTORY_FRAMES;
+
+                    // Tempo from the inter-onset interval (with octave folding
+                    // into a musical range), median-filtered for stability.
+                    if frames_since_onset > 0 {
+                        let mut interval = frames_since_onset as f32 / FRAMES_PER_SEC;
+                        while interval > 1.0 {
+                            interval *= 0.5; // fold < 60 BPM up an octave
+                        }
+                        while interval < 0.3 {
+                            interval *= 2.0; // fold > 200 BPM down an octave
+                        }
+                        if recent_intervals.len() >= 8 {
+                            recent_intervals.pop_front();
+                        }
+                        recent_intervals.push_back(interval);
+                        let mut sorted: Vec<f32> =
+                            recent_intervals.iter().copied().collect();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let median = sorted[sorted.len() / 2];
+                        let bpm = (60.0 / median).clamp(50.0, 200.0);
+                        smooth_bpm = if smooth_bpm == 0.0 {
+                            bpm
+                        } else {
+                            smooth_bpm + (bpm - smooth_bpm) * 0.25
+                        };
+                    }
+                    frames_since_onset = 0;
+                } else {
+                    beat_envelope *= BEAT_DECAY;
+                    frames_since_onset = frames_since_onset.saturating_add(1);
+                }
+                if refractory > 0 {
+                    refractory -= 1;
+                }
+                if flux_history.len() >= FLUX_HISTORY_LEN {
+                    flux_history.pop_front();
+                }
+                flux_history.push_back(flux);
+
+                // Drop the tempo estimate if onsets stop arriving (track ended,
+                // silence, or a long ambient passage) so stale BPM doesn't stick.
+                if frames_since_onset as f32 > 2.0 * FRAMES_PER_SEC {
+                    smooth_bpm = 0.0;
+                    recent_intervals.clear();
+                }
 
                 // Waveform
                 let mut waveform = vec![0.0f32; WAVEFORM_SIZE];
@@ -233,6 +320,8 @@ pub fn spawn_fft_thread(
                     spec.left_energy = left_e;
                     spec.right_energy = right_e;
                     spec.beat = beat;
+                    spec.beat_intensity = beat_envelope;
+                    spec.bpm = smooth_bpm;
                     true
                 } else {
                     false

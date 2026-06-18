@@ -1954,14 +1954,18 @@ func (a App) View() string {
 	// Artwork content
 	artContent := a.artwork.View(th, rightW-2, artLines)
 
-	// Visualizer: animated bars
+	// Visualizer: animated bars (sets the live BPM estimate as a side effect)
 	vizContent := a.viz.View(th, rightW-2, vizLines)
+	vizTitle := "VISUALIZER"
+	if bpm := a.viz.LastBPM(); bpm > 0 && a.playback.IsPlaying {
+		vizTitle = fmt.Sprintf("VISUALIZER · %d BPM", bpm)
+	}
 
 	rightCol := components.MultiSectionColumn(
 		[]components.PanelSection{
 			{Title: "TRACKLIST", Content: tlContent, Lines: tlLines},
 			{Title: "ARTWORK", Content: artContent, Lines: artLines},
-			{Title: "VISUALIZER", Content: vizContent, Lines: vizLines},
+			{Title: vizTitle, Content: vizContent, Lines: vizLines},
 		},
 		rightW, gridH, rightBc, th.Surface, th,
 	)

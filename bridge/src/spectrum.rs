@@ -30,8 +30,17 @@ pub struct SpectrumData {
     pub left_energy: f32,
     pub right_energy: f32,
 
-    /// Beat detection flag
+    /// Beat detection flag — true only on the analysis frame an onset fires.
     pub beat: bool,
+
+    /// Continuous beat envelope (0..1): jumps to 1.0 on a detected onset and
+    /// decays smoothly. Unlike `beat`, this is safe to sample at a lower rate
+    /// (the emit loop) without missing transient pulses, and drives smooth
+    /// beat-reactive motion in the renderer.
+    pub beat_intensity: f32,
+
+    /// Estimated tempo in beats per minute (0.0 until enough onsets are seen).
+    pub bpm: f32,
 
     /// Sample rate of the audio stream
     pub sample_rate: u32,
@@ -49,6 +58,8 @@ impl Default for SpectrumData {
             left_energy: 0.0,
             right_energy: 0.0,
             beat: false,
+            beat_intensity: 0.0,
+            bpm: 0.0,
             sample_rate: 44100,
         }
     }
