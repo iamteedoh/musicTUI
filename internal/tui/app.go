@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -184,6 +185,11 @@ func (a App) tryCachedAuthCmd() tea.Cmd {
 		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
 		username, err := client.FetchUsername(context.Background())
 		if err != nil {
+			// The app-owner-Premium 403 isn't a stale token — keep the cached
+			// credentials (re-auth won't fix it) and surface the real cause.
+			if errors.Is(err, sp.ErrAppOwnerNotPremium) {
+				return AppOwnerNotPremiumMsg{}
+			}
 			// Token is stale/revoked — clear it and prompt for fresh login
 			sp.ClearToken()
 			return StatusMsg("Session expired — press Ctrl+L to re-authenticate")
@@ -243,6 +249,9 @@ func (a App) waitForAuthCallbackCmd() tea.Cmd {
 		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
 		username, err := client.FetchUsername(context.Background())
 		if err != nil {
+			if errors.Is(err, sp.ErrAppOwnerNotPremium) {
+				return AppOwnerNotPremiumMsg{}
+			}
 			return AuthErrorMsg{Err: fmt.Errorf("failed to fetch user: %w", err)}
 		}
 
@@ -299,11 +308,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AuthURLMsg:
 		a.status = "Login URL opened — complete auth in browser"
 		a.home.AuthURL = msg.URL
+		a.home.AppOwnerNotPremium = false
 		return a, a.waitForAuthCallbackCmd()
 	case AuthSuccessMsg:
 		a.client = msg.Client
 		a.home.Username = msg.Username
 		a.home.AuthURL = ""
+		a.home.AppOwnerNotPremium = false
 		a.accessToken = msg.AccessToken
 		a.status = "" // Auth info shown in home view and title bar
 
@@ -339,6 +350,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// don't loop, and surface a clean status message.
 		a.pendingRetryTrack = nil
 		a.status = "Auth error: " + msg.Err.Error()
+		return a, nil
+	case AppOwnerNotPremiumMsg:
+		// Login worked but Spotify is blocking every API call because the
+		// Developer app's owner lacks Premium. Re-auth won't help, so render
+		// actionable recovery steps in the Home view instead of a raw error.
+		a.pendingRetryTrack = nil
+		a.client = nil
+		a.home.Username = ""
+		a.home.AuthURL = ""
+		a.home.AppOwnerNotPremium = true
+		a.status = "Spotify blocked the app: its owner needs Premium — see Home for how to fix"
 		return a, nil
 
 	// Import-backend (v0.2.0)

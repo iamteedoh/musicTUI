@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,10 +185,33 @@ func (c *Client) RemoveTracksFromPlaylist(ctx context.Context, playlistID string
 	return c.apiDeleteWithBody(ctx, url, body)
 }
 
+// ErrAppOwnerNotPremium indicates Spotify rejected the request because the
+// Spotify Developer app behind the configured client_id is owned by an account
+// without an active Premium subscription. Spotify gates the *entire* Web API
+// (even GET /me) on the app *owner's* subscription tier — not the logged-in
+// user's — so login succeeds but the first API call returns HTTP 403 with the
+// body "Active premium subscription required for the owner of the app". The fix
+// is to ensure the dashboard app's owner has Premium, or to delete and recreate
+// the app under a Premium account and update client_id.
+var ErrAppOwnerNotPremium = errors.New("the Spotify app owner needs an active Premium subscription")
+
+// isAppOwnerNotPremium reports whether err is the app-owner Premium 403. The
+// underlying zmb3 client can't decode Spotify's plain-text 403 body, so we
+// match on the stable phrase rather than a status code.
+func isAppOwnerNotPremium(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "premium subscription required for the owner")
+}
+
 // FetchUsername fetches and caches the current user's display name.
 func (c *Client) FetchUsername(ctx context.Context) (string, error) {
 	user, err := c.sp.CurrentUser(ctx)
 	if err != nil {
+		if isAppOwnerNotPremium(err) {
+			return "", ErrAppOwnerNotPremium
+		}
 		return "", err
 	}
 	name := user.DisplayName

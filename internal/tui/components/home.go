@@ -13,6 +13,12 @@ type Home struct {
 	NeedsConfig     bool   // true when no Spotify client_id is configured
 	Version         string // current build version ("dev" for local builds)
 	UpdateAvailable string // latest release tag if newer than Version; empty otherwise
+
+	// AppOwnerNotPremium is set when Spotify rejects API calls because the
+	// Developer app behind the configured client_id is owned by a non-Premium
+	// account. Triggers an actionable recovery block instead of the normal
+	// "not connected" prompt.
+	AppOwnerNotPremium bool
 }
 
 func NewHome() Home {
@@ -27,7 +33,30 @@ func (h Home) View(th theme.Theme, width, height int) string {
 	var lines []string
 
 	// Greeting + auth status
-	if h.Username != "" {
+	if h.AppOwnerNotPremium {
+		// Login succeeded but Spotify is 403-ing every API call because the
+		// Developer app's owner account isn't Premium. Re-auth can't fix this,
+		// so spell out the recovery steps.
+		errStyle := lipgloss.NewStyle().Foreground(th.Error).Bold(true)
+		lines = append(lines,
+			accent.Bold(true).Render("musicTUI"),
+			errStyle.Render("✗ Spotify blocked this app"),
+			"",
+			dim.Render("Login worked, but Spotify rejects every request because the"),
+			dim.Render("Developer app behind your Client ID is owned by an account"),
+			dim.Render("without active Premium. (It checks the app OWNER, not you.)"),
+			"",
+			muted.Render("How to fix:"),
+			dim.Render("1. Open https://developer.spotify.com/dashboard"),
+			dim.Render("   signed in as a Premium account."),
+			dim.Render("2. Delete this app, then create a new one."),
+			dim.Render("3. Set Redirect URI to http://127.0.0.1:8888/callback"),
+			dim.Render("4. Put the new Client ID in your config and press Ctrl+L."),
+			"",
+			muted.Render("Note: after a subscription change Spotify can take a few"),
+			muted.Render("hours to allow requests again."),
+		)
+	} else if h.Username != "" {
 		lines = append(lines,
 			accent.Bold(true).Render("Welcome, "+h.Username),
 			lipgloss.NewStyle().Foreground(th.Success).Render("● Connected to Spotify"),
