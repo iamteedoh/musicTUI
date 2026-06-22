@@ -96,6 +96,23 @@ func FetchArtwork(url string) ArtworkResult {
 	return ArtworkResult{Img: img, URL: url}
 }
 
+// Signature returns a string that changes whenever View's output would change,
+// for cache keying. It captures the async load transition (loading → img), so a
+// cached render is replaced the moment the album art finishes downloading.
+func (a *Artwork) Signature() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	loaded := '0'
+	if a.img != nil {
+		loaded = '1'
+	}
+	ld := '0'
+	if a.loading {
+		ld = '1'
+	}
+	return string(ld) + string(loaded) + "|" + a.imageURL + "|" + a.err + "|" + a.albumName + "|" + a.artist
+}
+
 func (a *Artwork) View(th theme.Theme, width, height int) string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
