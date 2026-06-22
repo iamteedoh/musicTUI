@@ -414,6 +414,8 @@ MUSICTUI_VIZ_GAIN=2.5 MUSICTUI_VIZ_SMOOTHING=12 musicTUI
 
 > The defaults are tuned to match a desktop CAVA/Kurve setup. The sync offset compensates for your system's audio-output buffer; if the visuals and beat ever drift, `MUSICTUI_VIZ_DELAY_MS` is the knob to adjust.
 
+> **Heads up:** the visualizer isn't 100% accurate yet. Beat/tempo sync and the audio-output delay depend on your hardware and audio stack, so it may run slightly ahead of or behind the music on some systems. It's already quite close, and tuning will keep improving over time. In the meantime, the env vars above (especially `MUSICTUI_VIZ_DELAY_MS`) let you dial it in for your setup.
+
 ---
 
 ## Settings
