@@ -4,10 +4,13 @@ A terminal-based music player for Spotify. Browse your library, search for music
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 
+![musicTUI — terminal Spotify player with a real-time, beat-synced audio visualizer](docs/musicTUI_gh.png)
+
 ---
 
 ## Table of Contents
 
+- [Features](#features)
 - [What You Need Before Starting](#what-you-need-before-starting)
 - [Installation](#installation)
   - [Download (Recommended)](#download-recommended)
@@ -41,6 +44,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
   - [Duplicate Playlist Cleanup](#duplicate-playlist-cleanup)
   - [Empty Playlist Cleanup](#empty-playlist-cleanup)
 - [Lyrics](#lyrics)
+- [Audio Visualizer](#audio-visualizer)
 - [Settings](#settings)
 - [Media Keys (Linux)](#media-keys-linux)
 - [Configuration File](#configuration-file)
@@ -49,6 +53,19 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - [Building from Source](#building-from-source-detailed)
 - [Roadmap](#roadmap)
 - [License](#license)
+
+---
+
+## Features
+
+- **Spotify playback** — stream your library, search the Spotify catalog, and control playback entirely from the terminal (Premium required for audio).
+- **Real-time audio visualizer** — a CAVA-style spectrum analyzer (the engine behind the popular "Kurve" desktop widget) that's tightly synced to the **beat and tempo**, with a horizontal rainbow gradient and a live BPM readout. Tunable at runtime — see [Audio Visualizer](#audio-visualizer).
+- **Synced lyrics** — line-synced lyrics that scroll with the music, inline or full-screen.
+- **Album artwork** — the current cover rendered right in your terminal.
+- **Full library & playlist management** — browse, search, and create / edit / delete / reorder playlists, move tracks between them, and clean up duplicate or empty playlists.
+- **Library import** — bring your playlists and liked songs over from **YouTube Music** and **Apple Music**.
+- **Media-key support** (Linux / D-Bus) plus a fast, fully keyboard-driven UI.
+- **Single self-contained binary** — the audio engine is embedded; nothing else to install. Light on resources (~25% of one CPU core at 60fps, ~40 MB RAM).
 
 ---
 
@@ -373,6 +390,29 @@ musicTUI displays lyrics for the currently playing track.
 - **Plain text lyrics** can be scrolled manually with **j** / **k**.
 
 You can also select **Lyrics** from the sidebar for a full-screen lyrics view.
+
+---
+
+## Audio Visualizer
+
+The right panel shows a real-time audio visualizer — a spectrum analyzer modeled on [CAVA](https://github.com/karlstav/cava) (the engine behind the popular "Kurve" desktop widget). It's tightly synced to the **beat and tempo** of whatever's playing, with a horizontal rainbow gradient and a live **BPM** readout in the panel title.
+
+It looks great out of the box, but you can fine-tune it with environment variables when you launch musicTUI — no rebuild needed:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MUSICTUI_VIZ_SMOOTHING` | `18` | Motion smoothing (0–100). Lower = snappier/twitchier, higher = smoother/floatier. |
+| `MUSICTUI_VIZ_GAIN` | `2.0` | Peak height. Higher = taller bars. |
+| `MUSICTUI_VIZ_DYNRANGE_DB` | `60` | Contrast. Higher = spikier (low floor); lower = fuller/more body. |
+| `MUSICTUI_VIZ_DELAY_MS` | `260` | Sync offset (ms) between the visuals and the audio you hear. **Increase** if the visualizer runs ahead of the beat; **decrease** if it lags behind. |
+
+Example — a taller, snappier visualizer:
+
+```
+MUSICTUI_VIZ_GAIN=2.5 MUSICTUI_VIZ_SMOOTHING=12 musicTUI
+```
+
+> The defaults are tuned to match a desktop CAVA/Kurve setup. The sync offset compensates for your system's audio-output buffer; if the visuals and beat ever drift, `MUSICTUI_VIZ_DELAY_MS` is the knob to adjust.
 
 ---
 
