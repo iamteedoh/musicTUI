@@ -32,8 +32,10 @@ type bridgeEvent struct {
 	Bass       *float32  `json:"bass,omitempty"`
 	Mids       *float32  `json:"mids,omitempty"`
 	Highs      *float32  `json:"highs,omitempty"`
-	Energy     *float32  `json:"energy,omitempty"`
-	Beat       *bool     `json:"beat,omitempty"`
+	Energy        *float32 `json:"energy,omitempty"`
+	Beat          *bool    `json:"beat,omitempty"`
+	BeatIntensity *float32 `json:"beat_intensity,omitempty"`
+	Bpm           *float32 `json:"bpm,omitempty"`
 }
 
 // Event is sent from the engine to the TUI.
@@ -57,14 +59,19 @@ type Engine struct {
 	started    bool
 	mu         sync.Mutex
 
-	// Debug log — captures all stderr lines (JSON events + librespot logs).
-	// Helps diagnose platform-specific audio/auth issues that would
-	// otherwise be invisible behind the alt-screen TUI.
-	logFile *os.File
+	// Debug log — captures stderr lines (librespot logs + non-spectrum JSON
+	// events). Helps diagnose platform-specific audio/auth issues that would
+	// otherwise be invisible behind the alt-screen TUI. Size-capped so a
+	// misbehaving track (e.g. symphonia spamming decode warnings) can't grow
+	// the file without bound — see writeLog. Only touched by readEvents'
+	// goroutine, so logBytes/logCapped need no locking.
+	logFile   *os.File
+	logBytes  int64
+	logCapped bool
 
-	// Spectrum analysis
+	// Spectrum analysis. Spectrum is populated from the Rust bridge's FFT
+	// thread via the "spectrum" events in readEvents — there is no Go-side FFT.
 	Spectrum *SharedSpectrum
-	analyzer *Analyzer
 }
 
 // LogPath returns the path where bridge stderr is captured.
@@ -85,7 +92,6 @@ func NewEngine(bridgePath, token string) *Engine {
 		token:      token,
 		events:     make(chan Event, 64),
 		Spectrum:   spectrum,
-		analyzer:   NewAnalyzer(spectrum),
 	}
 	e.volume.Store(75)
 	return e
@@ -115,10 +121,12 @@ func (e *Engine) ensureBridge() error {
 	setSysProcAttr(e.cmd)
 
 	// Ask librespot for info-level logs so the bridge.log file has enough
-	// detail to diagnose auth/device failures. Callers can override by
-	// exporting RUST_LOG before launching musicTUI.
+	// detail to diagnose auth/device failures, but silence symphonia's
+	// per-frame demuxer warnings ("skipping junk", "invalid mpeg audio
+	// header") which a malformed/undecodable track emits thousands of times
+	// per second. Callers can override by exporting RUST_LOG before launch.
 	if os.Getenv("RUST_LOG") == "" {
-		e.cmd.Env = append(os.Environ(), "RUST_LOG=librespot=info,info")
+		e.cmd.Env = append(os.Environ(), "RUST_LOG=librespot=info,symphonia=error,info")
 	}
 
 	var err error
@@ -151,6 +159,28 @@ func (e *Engine) ensureBridge() error {
 	return nil
 }
 
+// maxLogBytes caps the bridge debug log per TUI session. Plenty for
+// diagnostics; small enough that a runaway track can't fill the disk. The log
+// is truncated fresh on each launch (see ensureBridge), so this is a per-run
+// ceiling, not cumulative across runs.
+const maxLogBytes = 8 << 20 // 8 MiB
+
+// writeLog appends a line to the bridge debug log, enforcing maxLogBytes. Once
+// the cap is hit it writes a single truncation marker and stops, so a
+// misbehaving bridge can't grow the file without bound. Called only from
+// readEvents' goroutine.
+func (e *Engine) writeLog(line string) {
+	if e.logFile == nil || e.logCapped {
+		return
+	}
+	n, _ := fmt.Fprintln(e.logFile, line)
+	e.logBytes += int64(n)
+	if e.logBytes >= maxLogBytes {
+		fmt.Fprintf(e.logFile, "=== log capped at %d bytes — further bridge output suppressed for this session ===\n", e.logBytes)
+		e.logCapped = true
+	}
+}
+
 func (e *Engine) readEvents(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	// Bump the buffer size — librespot can occasionally emit very long log
@@ -158,15 +188,17 @@ func (e *Engine) readEvents(r io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Mirror every line to the debug log so we can diagnose later even
-		// if the bridge crashes or emits non-JSON output. Done before the
-		// JSON parse so librespot's own logs are preserved.
-		if e.logFile != nil {
-			fmt.Fprintln(e.logFile, line)
-		}
 		var ev bridgeEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue // skip non-JSON lines (librespot logs — captured in log file above)
+		isJSON := json.Unmarshal([]byte(line), &ev) == nil
+		// Mirror to the debug log so we can diagnose later even if the bridge
+		// crashes or emits non-JSON output — but skip the high-frequency
+		// "spectrum" frames (tens per second, each a 128-float array). They
+		// carry no diagnostic value and were the main driver of multi-GB logs.
+		if !(isJSON && ev.Event == "spectrum") {
+			e.writeLog(line)
+		}
+		if !isJSON {
+			continue // non-JSON lines are librespot logs — captured above
 		}
 
 		posMs := int64(0)
@@ -205,6 +237,12 @@ func (e *Engine) readEvents(r io.Reader) {
 				}
 				if ev.Beat != nil {
 					data.Beat = *ev.Beat
+				}
+				if ev.BeatIntensity != nil {
+					data.BeatIntensity = *ev.BeatIntensity
+				}
+				if ev.Bpm != nil {
+					data.BPM = *ev.Bpm
 				}
 				e.Spectrum.Write(data)
 			}

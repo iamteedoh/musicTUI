@@ -1,9 +1,8 @@
-use tracing::info;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
@@ -17,15 +16,52 @@ const HOP_SIZE: usize = 256;
 const NUM_BINS: usize = 128;
 const WAVEFORM_SIZE: usize = 512;
 const PEAK_DECAY: f32 = 0.99;
-const BEAT_THRESHOLD: f32 = 1.4;
-const BEAT_HISTORY_LEN: usize = 172;
 const BIN_SMOOTH: f32 = 0.65; // EMA alpha — fast response, let visualizers add their own smoothing
 const LR_SMOOTH: f32 = 0.45;
 
-/// Audio output buffer compensation delay in samples.
-/// Set to 0 for no delay. Increase if viz appears ahead of audio.
-/// At 44100 Hz: 1000 samples ≈ 23ms.
-const VIZ_DELAY_SAMPLES: usize = 0;
+// ── Beat / onset detection (spectral flux on low frequencies) ────────────
+// The FFT thread runs at the hop rate: 44100 / HOP_SIZE ≈ 172 frames/sec.
+const FRAMES_PER_SEC: f32 = 44100.0 / HOP_SIZE as f32;
+// Bins (of NUM_BINS log-spaced bins) to watch for onsets. Narrowed to the
+// kick band (~0–200 Hz) — the steady low-end pulse that defines the tempo —
+// so snare/synth/vocal transients don't trigger false beats.
+const FLUX_BASS_BINS: usize = 12;
+// Rolling window for the adaptive threshold (~500 ms of flux history).
+const FLUX_HISTORY_LEN: usize = 86;
+// Threshold = mean + K * stddev of recent flux. Higher K = fewer, surer beats.
+const FLUX_THRESHOLD_K: f32 = 1.4;
+// Absolute floor so silence/near-silence never triggers.
+const FLUX_MIN: f32 = 0.01;
+// Beat envelope decay per frame (~0.88 → pulse fades over ~80 ms).
+const BEAT_DECAY: f32 = 0.88;
+// Refractory period: ignore new onsets for ~120 ms after one fires, so a single
+// hit can't double-trigger (caps detected tempo around 500 BPM).
+const REFRACTORY_FRAMES: usize = (0.12 * FRAMES_PER_SEC) as usize;
+// Phase-locked beat clock: how strongly each detected onset nudges the steady
+// clock toward it (0 = ignore onsets, 1 = snap). Small = smooth, stable lock.
+const PHASE_CORRECTION: f32 = 0.10;
+// Only onsets landing within this much of the expected beat (in phase units)
+// steer the clock — off-beat onsets (eighth-note bass, syncopation) are ignored.
+const PHASE_GATE: f32 = 0.22;
+
+// ── Tempo estimation (autocorrelation of the flux envelope) ──────────────
+// Inter-onset intervals are too noisy for tempo; autocorrelating a few seconds
+// of the onset envelope robustly finds the dominant beat period instead.
+const TEMPO_MIN_BPM: f32 = 85.0;
+const TEMPO_MAX_BPM: f32 = 175.0;
+const TEMPO_ENV_LEN: usize = 520; // ~3s of flux history at ~172 Hz
+const TEMPO_UPDATE_FRAMES: usize = 43; // recompute tempo ~4x/sec
+// Lag (in frames) bounds for the BPM search range.
+const TEMPO_MIN_LAG: usize = (60.0 * FRAMES_PER_SEC / TEMPO_MAX_BPM) as usize;
+const TEMPO_MAX_LAG: usize = (60.0 * FRAMES_PER_SEC / TEMPO_MIN_BPM) as usize;
+
+/// Default audio-output-buffer compensation, in milliseconds. The visualizer
+/// analyses samples as librespot produces them, but they're only heard after
+/// rodio's + ALSA's output buffer — so without compensation the viz runs ahead
+/// of the speakers. Tuned by ear with the CAVA-style (low-smoothing, crisp)
+/// visualizer, which exposes the lead the old blurry viz used to mask.
+/// Override at runtime with MUSICTUI_VIZ_DELAY_MS (0 disables).
+const VIZ_DELAY_MS_DEFAULT: f32 = 260.0;
 
 pub fn spawn_fft_thread(
     mut consumer: HeapCons<f32>,
@@ -33,6 +69,18 @@ pub fn spawn_fft_thread(
     left_energy: Arc<AtomicU32>,
     right_energy: Arc<AtomicU32>,
 ) -> JoinHandle<()> {
+    // Resolve the output-latency compensation (samples of mono audio to hold
+    // back before analysis). Tunable without a rebuild via MUSICTUI_VIZ_DELAY_MS.
+    let viz_delay_samples: usize = {
+        let ms = std::env::var("MUSICTUI_VIZ_DELAY_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .unwrap_or(VIZ_DELAY_MS_DEFAULT)
+            .max(0.0);
+        eprintln!("[FFT] viz delay = {:.0}ms", ms);
+        (ms * 44.1) as usize // 44100 Hz, mono
+    };
+
     thread::spawn(move || {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
@@ -49,7 +97,18 @@ pub fn spawn_fft_thread(
         let mut samples_since_fft: usize = 0;
 
         let mut peaks = vec![0.0f32; NUM_BINS];
-        let mut energy_history: Vec<f32> = Vec::with_capacity(BEAT_HISTORY_LEN);
+
+        // Beat/onset detection state (spectral flux on the low-frequency bins).
+        let mut prev_bass = vec![0.0f32; FLUX_BASS_BINS];
+        let mut flux_history: VecDeque<f32> = VecDeque::with_capacity(FLUX_HISTORY_LEN);
+        let mut beat_envelope: f32 = 0.0;
+        let mut refractory: usize = 0;
+        let mut frames_since_onset: u32 = 0;
+        let mut prev_flux: f32 = 0.0;
+        let mut beat_phase: f32 = 0.0; // phase-locked beat clock, 0..1
+        let mut flux_env: VecDeque<f32> = VecDeque::with_capacity(TEMPO_ENV_LEN); // for autocorrelation
+        let mut tempo_timer: usize = 0;
+        let mut smooth_bpm: f32 = 0.0;
 
         // Persistent smoothed output — the key to eliminating jitter
         let mut smooth_bins = vec![0.0f32; NUM_BINS];
@@ -58,15 +117,12 @@ pub fn spawn_fft_thread(
 
         let mut fft_input = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
         let mut read_buf = vec![0.0f32; HOP_SIZE];
-        let mut fft_log_timer = Instant::now();
-        let mut fft_frames: u64 = 0;
-        let mut total_reads: u64 = 0;
 
         // Delay buffers: compensate for audio output latency so viz syncs with speakers
         let mut delay_buf: VecDeque<f32> =
-            VecDeque::with_capacity(VIZ_DELAY_SAMPLES + HOP_SIZE);
+            VecDeque::with_capacity(viz_delay_samples + HOP_SIZE);
         // Parallel L/R delay — captures atomic values at write time, reads them delayed
-        let lr_delay_hops = VIZ_DELAY_SAMPLES / HOP_SIZE + 1;
+        let lr_delay_hops = viz_delay_samples / HOP_SIZE + 1;
         let mut lr_delay: VecDeque<(f32, f32)> =
             VecDeque::with_capacity(lr_delay_hops + 4);
 
@@ -76,7 +132,6 @@ pub fn spawn_fft_thread(
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
-            total_reads += 1;
 
             // Push new samples into delay buffer
             for &s in &read_buf[..count] {
@@ -90,7 +145,7 @@ pub fn spawn_fft_thread(
             );
 
             // Only process samples that have been delayed long enough
-            while delay_buf.len() > VIZ_DELAY_SAMPLES {
+            while delay_buf.len() > viz_delay_samples {
                 let sample = delay_buf.pop_front().unwrap();
                 circ_buf[circ_pos] = sample;
                 circ_pos = (circ_pos + 1) % FFT_SIZE;
@@ -183,18 +238,147 @@ pub fn spawn_fft_thread(
                     / NUM_BINS as f32)
                     .sqrt();
 
-                // Beat detection
-                if energy_history.len() >= BEAT_HISTORY_LEN {
-                    energy_history.remove(0);
+                // ── Beat tracking ───────────────────────────────────────
+                // 1) Onset detection. Spectral flux on the kick band (positive
+                //    frame-to-frame increases), with an adaptive threshold and a
+                //    rising-edge trigger so each kick fires exactly once. Onsets
+                //    feed the tempo estimate and phase clock — NOT the visual
+                //    pulse directly (that's what made it twitchy before).
+                let mut flux = 0.0f32;
+                for i in 0..FLUX_BASS_BINS {
+                    let diff = bins[i] - prev_bass[i];
+                    if diff > 0.0 {
+                        flux += diff;
+                    }
+                    prev_bass[i] = bins[i];
                 }
-                energy_history.push(energy);
-                let avg_energy = if energy_history.is_empty() {
-                    0.0
+
+                // Adaptive threshold from recent flux: mean + K * stddev.
+                let (mean, std) = if flux_history.is_empty() {
+                    (0.0, 0.0)
                 } else {
-                    energy_history.iter().sum::<f32>() / energy_history.len() as f32
+                    let n = flux_history.len() as f32;
+                    let m = flux_history.iter().sum::<f32>() / n;
+                    let var =
+                        flux_history.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / n;
+                    (m, var.sqrt())
                 };
-                let beat =
-                    energy > avg_energy * BEAT_THRESHOLD && avg_energy > 0.01;
+                let threshold = mean + FLUX_THRESHOLD_K * std;
+
+                // Rising edge: flux crosses up through the threshold, outside the
+                // refractory window.
+                let onset = refractory == 0
+                    && flux > FLUX_MIN
+                    && flux > threshold
+                    && prev_flux <= threshold;
+
+                if onset {
+                    refractory = REFRACTORY_FRAMES;
+                    frames_since_onset = 0;
+
+                    // Phase-lock: nudge the clock so on-beat onsets settle on
+                    // phase 0. The phase gate ignores onsets far from the
+                    // expected beat (off-beat bass notes, syncopation), so the
+                    // bassline's eighth notes can't drag the clock to half-beats.
+                    if smooth_bpm > 0.0 {
+                        let err = if beat_phase < 0.5 {
+                            beat_phase
+                        } else {
+                            beat_phase - 1.0
+                        };
+                        if err.abs() < PHASE_GATE {
+                            beat_phase -= err * PHASE_CORRECTION;
+                            if beat_phase < 0.0 {
+                                beat_phase += 1.0;
+                            }
+                        }
+                    }
+                } else {
+                    frames_since_onset = frames_since_onset.saturating_add(1);
+                }
+                if refractory > 0 {
+                    refractory -= 1;
+                }
+                prev_flux = flux;
+                if flux_history.len() >= FLUX_HISTORY_LEN {
+                    flux_history.pop_front();
+                }
+                flux_history.push_back(flux);
+
+                // Tempo via autocorrelation of the flux envelope. Recomputed a
+                // few times per second over a multi-second window — robust to
+                // which subdivisions trigger, unlike inter-onset intervals.
+                if flux_env.len() >= TEMPO_ENV_LEN {
+                    flux_env.pop_front();
+                }
+                flux_env.push_back(flux);
+                tempo_timer += 1;
+                if tempo_timer >= TEMPO_UPDATE_FRAMES && flux_env.len() >= TEMPO_MAX_LAG * 2 {
+                    tempo_timer = 0;
+                    let env: Vec<f32> = flux_env.iter().copied().collect();
+                    let n = env.len();
+                    let hi = (TEMPO_MAX_LAG * 2).min(n - 1);
+                    let mut ac = vec![0.0f32; hi + 1];
+                    for lag in TEMPO_MIN_LAG..=hi {
+                        let mut sum = 0.0f32;
+                        for i in lag..n {
+                            sum += env[i] * env[i - lag];
+                        }
+                        ac[lag] = sum / (n - lag) as f32;
+                    }
+                    // Pick the lag with the strongest autocorrelation, boosted by
+                    // its octave harmonic so the true tempo beats half-tempo.
+                    let mut best_lag = 0usize;
+                    let mut best = 0.0f32;
+                    for lag in TEMPO_MIN_LAG..=TEMPO_MAX_LAG {
+                        let mut score = ac[lag];
+                        if lag * 2 <= hi {
+                            score += 0.5 * ac[lag * 2];
+                        }
+                        if score > best {
+                            best = score;
+                            best_lag = lag;
+                        }
+                    }
+                    if best_lag > 0 && best > 0.0 {
+                        let bpm = (60.0 * FRAMES_PER_SEC / best_lag as f32)
+                            .clamp(TEMPO_MIN_BPM, TEMPO_MAX_BPM);
+                        smooth_bpm = if smooth_bpm == 0.0 {
+                            bpm
+                        } else {
+                            smooth_bpm + (bpm - smooth_bpm) * 0.10
+                        };
+                    }
+                }
+
+                // 2) Pulse generation. Once a tempo is locked, the beat envelope
+                //    is driven by a steady phase clock running at that BPM — this
+                //    is what makes the visual *match the tempo* rather than react
+                //    to every transient. Before lock, pulse on raw onsets.
+                let mut beat = false;
+                if smooth_bpm > 0.0 {
+                    beat_phase += smooth_bpm / 60.0 / FRAMES_PER_SEC;
+                    if beat_phase >= 1.0 {
+                        beat_phase -= 1.0;
+                        beat_envelope = 1.0;
+                        beat = true;
+                    } else {
+                        beat_envelope *= BEAT_DECAY;
+                    }
+                } else if onset {
+                    beat_envelope = 1.0;
+                    beat = true;
+                } else {
+                    beat_envelope *= BEAT_DECAY;
+                }
+
+                // Drop tempo + clock if onsets stop (track end, silence, ambient).
+                if frames_since_onset as f32 > 2.0 * FRAMES_PER_SEC {
+                    smooth_bpm = 0.0;
+                    beat_phase = 0.0;
+                    flux_env.clear();
+                    tempo_timer = 0;
+                }
 
                 // Waveform
                 let mut waveform = vec![0.0f32; WAVEFORM_SIZE];
@@ -224,7 +408,7 @@ pub fn spawn_fft_thread(
                 };
 
                 // Write to shared spectrum
-                let write_ok = if let Ok(mut spec) = spectrum.try_write() {
+                if let Ok(mut spec) = spectrum.try_write() {
                     spec.magnitudes.copy_from_slice(&smooth_bins);
                     spec.peaks.copy_from_slice(&peaks);
                     spec.waveform = waveform;
@@ -233,18 +417,8 @@ pub fn spawn_fft_thread(
                     spec.left_energy = left_e;
                     spec.right_energy = right_e;
                     spec.beat = beat;
-                    true
-                } else {
-                    false
-                };
-
-                fft_frames += 1;
-                if fft_log_timer.elapsed() >= Duration::from_secs(2) {
-                    info!(
-                        "[FFT] frames={} reads={} energy={:.4} bass={:.4} L={:.4} R={:.4} write_ok={}",
-                        fft_frames, total_reads, energy, bass, left_e, right_e, write_ok
-                    );
-                    fft_log_timer = Instant::now();
+                    spec.beat_intensity = beat_envelope;
+                    spec.bpm = smooth_bpm;
                 }
             }
         }

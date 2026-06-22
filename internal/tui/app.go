@@ -2,10 +2,12 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,7 +46,7 @@ type App struct {
 	search   components.Search
 	playlist components.Playlists
 	playing  components.NowPlaying
-	viz      components.MiniVisualizer
+	viz      *components.MiniVisualizer
 	lyrics   components.Lyrics
 	artwork  components.Artwork
 	settings components.Settings
@@ -56,6 +58,11 @@ type App struct {
 	playback model.PlaybackState
 	queue    model.Queue
 	status   string
+
+	// viewCache memoizes the expensive lipgloss panel renders (borders/margins)
+	// for regions that don't change every frame. Pointer so it persists across
+	// View's value receiver (App is copied each frame). See (*App).View.
+	cache *viewCache
 
 	// Spotify
 	auth        *sp.Auth
@@ -101,6 +108,7 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		playlist: components.NewPlaylists(),
 		playing:  components.NewNowPlaying(),
 		viz:      components.NewMiniVisualizer(),
+		cache:      &viewCache{},
 		lyrics:   components.NewLyrics(),
 		artwork:  components.NewArtwork(),
 		settings: components.NewSettings(),
@@ -160,6 +168,10 @@ func listenMprisCmd(srv *mpris.Server) tea.Cmd {
 	}
 }
 
+// 60 fps render tick. The visualizer is tuned for this rate (its CAVA timing
+// and the audio-output delay compensation were dialed in at 60 fps); the
+// per-frame cost is kept low by precomputing the visualizer's per-cell colors
+// (see miniviz rebuild) rather than styling each cell every frame.
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second/60, func(t time.Time) tea.Msg {
 		return TickMsg{}
@@ -184,6 +196,11 @@ func (a App) tryCachedAuthCmd() tea.Cmd {
 		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
 		username, err := client.FetchUsername(context.Background())
 		if err != nil {
+			// The app-owner-Premium 403 isn't a stale token — keep the cached
+			// credentials (re-auth won't fix it) and surface the real cause.
+			if errors.Is(err, sp.ErrAppOwnerNotPremium) {
+				return AppOwnerNotPremiumMsg{}
+			}
 			// Token is stale/revoked — clear it and prompt for fresh login
 			sp.ClearToken()
 			return StatusMsg("Session expired — press Ctrl+L to re-authenticate")
@@ -243,6 +260,9 @@ func (a App) waitForAuthCallbackCmd() tea.Cmd {
 		client := sp.NewClient(spotifylib.New(httpClient), httpClient)
 		username, err := client.FetchUsername(context.Background())
 		if err != nil {
+			if errors.Is(err, sp.ErrAppOwnerNotPremium) {
+				return AppOwnerNotPremiumMsg{}
+			}
 			return AuthErrorMsg{Err: fmt.Errorf("failed to fetch user: %w", err)}
 		}
 
@@ -299,11 +319,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AuthURLMsg:
 		a.status = "Login URL opened — complete auth in browser"
 		a.home.AuthURL = msg.URL
+		a.home.AppOwnerNotPremium = false
 		return a, a.waitForAuthCallbackCmd()
 	case AuthSuccessMsg:
 		a.client = msg.Client
 		a.home.Username = msg.Username
 		a.home.AuthURL = ""
+		a.home.AppOwnerNotPremium = false
 		a.accessToken = msg.AccessToken
 		a.status = "" // Auth info shown in home view and title bar
 
@@ -339,6 +361,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// don't loop, and surface a clean status message.
 		a.pendingRetryTrack = nil
 		a.status = "Auth error: " + msg.Err.Error()
+		return a, nil
+	case AppOwnerNotPremiumMsg:
+		// Login worked but Spotify is blocking every API call because the
+		// Developer app's owner lacks Premium. Re-auth won't help, so render
+		// actionable recovery steps in the Home view instead of a raw error.
+		a.pendingRetryTrack = nil
+		a.client = nil
+		a.home.Username = ""
+		a.home.AuthURL = ""
+		a.home.AppOwnerNotPremium = true
+		a.status = "Spotify blocked the app: its owner needs Premium — see Home for how to fix"
 		return a, nil
 
 	// Import-backend (v0.2.0)
@@ -1662,6 +1695,30 @@ func (a App) viewTitle() string {
 	}
 }
 
+// panelMemo caches one panel's rendered string, keyed by a cheap content/geometry
+// signature. The key encodes everything that affects the render, so a hit can
+// never return stale output — a change to any input changes the key.
+type panelMemo struct{ key, val string }
+
+func (m *panelMemo) get(key string, build func() string) string {
+	if m.key == key && m.val != "" {
+		return m.val
+	}
+	v := build()
+	m.key, m.val = key, v
+	return v
+}
+
+// viewCache holds the memo slots for the panels that are static (or near-static)
+// during playback. The visualizer panel is deliberately NOT cached — it renders
+// live every frame.
+type viewCache struct {
+	left   panelMemo
+	center panelMemo
+	title  panelMemo
+	art    panelMemo
+}
+
 func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return ""
@@ -1673,6 +1730,11 @@ func (a App) View() string {
 
 	th := a.theme
 	bc := th.Border // all inner panels use this border color
+
+	// Theme fingerprint — prefixed into every cache key so switching themes
+	// invalidates all memoized panels.
+	tf := string(th.Border) + "/" + string(th.BorderFocused) + "/" +
+		string(th.Accent) + "/" + string(th.Surface) + "/" + string(th.FgDim)
 
 	// ── SONICA-style 6-panel grid layout ──
 	// Title line at top, 3-column grid in the middle, status bar at bottom.
@@ -1754,13 +1816,19 @@ func (a App) View() string {
 	if a.focus == model.FocusSidebar {
 		leftBc = th.BorderFocused
 	}
-	leftCol := components.MultiSectionColumn(
-		[]components.PanelSection{
-			{Title: "NAVIGATION", Content: navContent, Lines: navLines},
-			{Title: "PLAYLISTS", Content: plContent, Lines: plLines},
-		},
-		leftW, gridH, leftBc, th.Surface, th,
-	)
+	leftKey := tf + "|" + string(leftBc) + "|" +
+		strconv.Itoa(leftW) + "x" + strconv.Itoa(gridH) + "|" +
+		strconv.Itoa(navLines) + "/" + strconv.Itoa(plLines) + "|" +
+		navContent + "\x1e" + plContent
+	leftCol := a.cache.left.get(leftKey, func() string {
+		return components.MultiSectionColumn(
+			[]components.PanelSection{
+				{Title: "NAVIGATION", Content: navContent, Lines: navLines},
+				{Title: "PLAYLISTS", Content: plContent, Lines: plLines},
+			},
+			leftW, gridH, leftBc, th.Surface, th,
+		)
+	})
 
 	// ══════════════════════════════════════════════════════════════
 	// CENTER COLUMN: NOW PLAYING / view content (full height)
@@ -1777,12 +1845,21 @@ func (a App) View() string {
 	centerInnerW := centerW - 2
 	centerInnerH := gridH - 2
 
+	// Quantize the displayed position to 250ms so the center panel's content is
+	// byte-identical most frames (it then reuses its cached border render rather
+	// than rebuilding 60x/sec for a sub-character progress change). The live
+	// 1:28/5:26 clock is in the status bar, which is NOT cached. Lyrics highlight
+	// at 250ms resolution — imperceptible for line-synced lyrics.
+	qPlayback := a.playback
+	qPlayback.Position = a.playback.Position.Truncate(250 * time.Millisecond)
+	qMs := qPlayback.Position.Milliseconds()
+
 	// Build center panel content: now-playing info at top + current view below
 	var centerContent string
 
 	// Now-playing header (if playing)
 	if a.playback.Track != nil {
-		npContent := a.playing.PanelContent(th, a.playback, centerInnerW)
+		npContent := a.playing.PanelContent(th, qPlayback, centerInnerW)
 		separator := lipgloss.NewStyle().Foreground(th.Border).Render(
 			"\n" + strings.Repeat("─", centerInnerW) + "\n")
 		centerContent = npContent + separator
@@ -1824,7 +1901,7 @@ func (a App) View() string {
 	case model.ViewPlaylists:
 		viewContent = a.playlist.View(th, centerInnerW, viewH)
 	case model.ViewLyrics:
-		viewContent = a.lyrics.View(th, centerInnerW, viewH, a.playback.Position.Milliseconds())
+		viewContent = a.lyrics.View(th, centerInnerW, viewH, qMs)
 	case model.ViewSettings:
 		viewContent = a.settings.View(th, a.config, centerInnerW, viewH)
 	case model.ViewHelp:
@@ -1861,7 +1938,7 @@ func (a App) View() string {
 			"\n" + strings.Repeat("─", centerInnerW) + "\n")
 		lyricsHeader := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(" LYRICS") +
 			lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("  (press l to hide)") + "\n"
-		lyricsContent := a.lyrics.View(th, centerInnerW, lyricsH, a.playback.Position.Milliseconds())
+		lyricsContent := a.lyrics.View(th, centerInnerW, lyricsH, qMs)
 		viewContent += lyricsSep + lyricsHeader + lyricsContent
 	}
 
@@ -1870,7 +1947,12 @@ func (a App) View() string {
 		centerTitle = a.viewTitle()
 	}
 	centerContent += viewContent
-	centerPanel := components.TitledPanel(centerTitle, centerContent, centerW, gridH, centerBc, th)
+	centerKey := tf + "|" + string(centerBc) + "|" +
+		strconv.Itoa(centerW) + "x" + strconv.Itoa(gridH) + "|" +
+		centerTitle + "\x1e" + centerContent
+	centerPanel := a.cache.center.get(centerKey, func() string {
+		return components.TitledPanel(centerTitle, centerContent, centerW, gridH, centerBc, th)
+	})
 
 	// ══════════════════════════════════════════════════════════════
 	// RIGHT COLUMN: TRACKLIST + ARTWORK + VISUALIZER (single bordered column)
@@ -1929,17 +2011,26 @@ func (a App) View() string {
 		tlContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" No active queue")
 	}
 
-	// Artwork content
-	artContent := a.artwork.View(th, rightW-2, artLines)
+	// Artwork content — cached on the artwork's signature so the per-cell dot
+	// matrix isn't re-rendered every frame (the cover is static within a track;
+	// the signature changes when the art loads or the track changes).
+	artKey := tf + "|" + strconv.Itoa(rightW-2) + "x" + strconv.Itoa(artLines) + "|" + a.artwork.Signature()
+	artContent := a.cache.art.get(artKey, func() string {
+		return a.artwork.View(th, rightW-2, artLines)
+	})
 
-	// Visualizer: animated bars
+	// Visualizer: animated bars (sets the live BPM estimate as a side effect)
 	vizContent := a.viz.View(th, rightW-2, vizLines)
+	vizTitle := "VISUALIZER"
+	if bpm := a.viz.LastBPM(); bpm > 0 && a.playback.IsPlaying {
+		vizTitle = fmt.Sprintf("VISUALIZER · %d BPM", bpm)
+	}
 
 	rightCol := components.MultiSectionColumn(
 		[]components.PanelSection{
 			{Title: "TRACKLIST", Content: tlContent, Lines: tlLines},
 			{Title: "ARTWORK", Content: artContent, Lines: artLines},
-			{Title: "VISUALIZER", Content: vizContent, Lines: vizLines},
+			{Title: vizTitle, Content: vizContent, Lines: vizLines},
 		},
 		rightW, gridH, rightBc, th.Surface, th,
 	)
@@ -1954,20 +2045,23 @@ func (a App) View() string {
 	if a.home.Username != "" {
 		titleStr += " | ● " + a.home.Username
 	}
-	titleText := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(titleStr)
-	titleVisualW := lipgloss.Width(titleText)
-	titleDashL := (a.width - titleVisualW - 2) / 2
-	titleDashR := a.width - titleDashL - titleVisualW - 2
-	if titleDashL < 1 {
-		titleDashL = 1
-	}
-	if titleDashR < 1 {
-		titleDashR = 1
-	}
-	borderStyle := lipgloss.NewStyle().Foreground(th.Border)
-	titleLine := borderStyle.Render(strings.Repeat("─", titleDashL)) + " " +
-		titleText + " " +
-		borderStyle.Render(strings.Repeat("─", titleDashR))
+	titleKey := tf + "|" + strconv.Itoa(a.width) + "|" + titleStr
+	titleLine := a.cache.title.get(titleKey, func() string {
+		titleText := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(titleStr)
+		titleVisualW := lipgloss.Width(titleText)
+		titleDashL := (a.width - titleVisualW - 2) / 2
+		titleDashR := a.width - titleDashL - titleVisualW - 2
+		if titleDashL < 1 {
+			titleDashL = 1
+		}
+		if titleDashR < 1 {
+			titleDashR = 1
+		}
+		borderStyle := lipgloss.NewStyle().Foreground(th.Border)
+		return borderStyle.Render(strings.Repeat("─", titleDashL)) + " " +
+			titleText + " " +
+			borderStyle.Render(strings.Repeat("─", titleDashR))
+	})
 
 	// Status bar (full width)
 	statusBar := a.playing.StatusBarView(th, a.playback, a.width)

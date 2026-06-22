@@ -35,6 +35,13 @@ type AuthSuccessMsg struct {
 	AccessToken string
 }
 type AuthErrorMsg struct{ Err error }
+
+// AppOwnerNotPremiumMsg signals that Spotify rejected API calls because the
+// Developer app behind the configured client_id is owned by a non-Premium
+// account. This is distinct from a normal auth failure — re-auth won't help;
+// the user must fix the app owner's subscription or recreate the app.
+type AppOwnerNotPremiumMsg struct{}
+
 type SaveClientIDMsg struct{ ClientID string }
 
 // Data fetching messages
