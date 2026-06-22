@@ -32,6 +32,10 @@ type Playlists struct {
 
 	// Set by app to indicate which track is currently playing
 	PlayingTrackID string
+
+	// RestoreAvailable is set by the app when at least one on-disk playlist
+	// backup exists, so the list view can advertise the Shift+R restore key.
+	RestoreAvailable bool
 }
 
 func NewPlaylists() Playlists {
@@ -228,13 +232,18 @@ func (p Playlists) viewList(th theme.Theme, width, height int) string {
 	}
 
 	// ── Key hints ──
-	b.WriteString("\n " + RenderHints(th, []Hint{
+	hints := []Hint{
 		{"j/k · ↑↓", "move"},
 		{"Enter", "open"},
 		{"c", "create"},
 		{"e", "edit"},
 		{"d", "remove"},
-	}))
+	}
+	// Only advertise restore when there's actually a backup to restore from.
+	if p.RestoreAvailable {
+		hints = append(hints, Hint{"Shift+R", "restore"})
+	}
+	b.WriteString("\n " + RenderHints(th, hints))
 
 	return b.String()
 }
@@ -335,13 +344,17 @@ func (p Playlists) viewTracks(th theme.Theme, width, height int) string {
 	}
 
 	// ── Key hints ──
-	b.WriteString("\n " + RenderHints(th, []Hint{
+	trackHints := []Hint{
 		{"j/k · ↑↓", "move"},
 		{"Enter", "play"},
 		{"d", "remove"},
 		{"m", "move to playlist"},
 		{"Esc", "back"},
-	}))
+	}
+	if p.RestoreAvailable {
+		trackHints = append(trackHints, Hint{"Shift+R", "restore"})
+	}
+	b.WriteString("\n " + RenderHints(th, trackHints))
 
 	return b.String()
 }

@@ -36,6 +36,15 @@ func NewClient(sp *spotifylib.Client, httpClient *http.Client) *Client {
 	return &Client{sp: sp, httpClient: httpClient}
 }
 
+// isHTTPSuccess reports whether code is any 2xx status. Spotify's write
+// endpoints return a mix of 200, 201, and 204 (e.g. unfollow playlist returns
+// 204 No Content), so any 2xx must be treated as success. Treating only
+// 200/201 as success caused unfollows to report a spurious error even though
+// they had already succeeded on Spotify's side.
+func isHTTPSuccess(code int) bool {
+	return code >= 200 && code < 300
+}
+
 // apiGet makes an authenticated GET request to the Spotify API.
 func (c *Client) apiGet(ctx context.Context, url string, result any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -70,7 +79,7 @@ func (c *Client) apiPost(ctx context.Context, url string, body any, result any) 
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if !isHTTPSuccess(resp.StatusCode) {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("%s: %s", resp.Status, b)
 	}
@@ -96,7 +105,7 @@ func (c *Client) apiPut(ctx context.Context, url string, body any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if !isHTTPSuccess(resp.StatusCode) {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("%s: %s", resp.Status, b)
 	}
@@ -125,7 +134,7 @@ func (c *Client) apiDeleteWithBody(ctx context.Context, url string, body any) er
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if !isHTTPSuccess(resp.StatusCode) {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("%s: %s", resp.Status, b)
 	}
@@ -165,6 +174,15 @@ func (c *Client) UpdatePlaylistDetails(ctx context.Context, playlistID, name, de
 func (c *Client) DeletePlaylist(ctx context.Context, playlistID string) error {
 	url := fmt.Sprintf("%s/playlists/%s/followers", spotifyBaseURL, playlistID)
 	return c.apiDeleteWithBody(ctx, url, nil)
+}
+
+// FollowPlaylist re-adds a playlist to the current user's library by ID.
+// Because DeletePlaylist only unfollows (Spotify never hard-deletes a playlist
+// object), re-following by the same ID fully restores a previously removed
+// playlist with all of its tracks intact — this is the primary recovery path.
+func (c *Client) FollowPlaylist(ctx context.Context, playlistID string) error {
+	url := fmt.Sprintf("%s/playlists/%s/followers", spotifyBaseURL, playlistID)
+	return c.apiPut(ctx, url, map[string]any{"public": false})
 }
 
 // AddTracksToPlaylist adds tracks to a playlist by their URIs.

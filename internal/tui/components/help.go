@@ -93,6 +93,7 @@ var helpGroups = []helpGroup{
 			{"c", "create new playlist"},
 			{"e", "edit playlist name / description"},
 			{"d", "remove from library (unfollow)"},
+			{"Shift+R", "restore unfollowed playlists from last backup"},
 		},
 	},
 	{

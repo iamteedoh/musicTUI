@@ -531,6 +531,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return strings.ToLower(a.playlist.Items[i].Name) < strings.ToLower(a.playlist.Items[j].Name)
 		})
 		a.playlist.Loading = false
+		// Advertise the restore key only when a backup actually exists.
+		a.playlist.RestoreAvailable = sp.HasBackups()
 
 		// Opt-in cleanup prompts. Disabled by default because these
 		// actions unfollow playlists (Spotify's API has no true delete),
@@ -548,8 +550,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					dupMsg += "  " + n + "\n"
 				}
 				dupMsg += "\nMerge into one playlist each?\n" +
-					"Extras will be unfollowed (not deleted). If you own them\n" +
-					"you will not be able to list them again via this app."
+					"Extras will be unfollowed (not deleted). A backup is saved\n" +
+					"first — press R afterwards to restore, or use Spotify's\n" +
+					"90-day recovery page."
 				a.modal.ShowConfirm("Merge Duplicate Playlists", dupMsg, components.ActionConsolidateDuplicates, "")
 				return a, nil
 			}
@@ -559,8 +562,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					emptyMsg += fmt.Sprintf("  \"%s\"\n", pl.Name)
 				}
 				emptyMsg += "\nRemove them from your library?\n" +
-					"These will be unfollowed (not deleted). If you own them\n" +
-					"you will not be able to list them again via this app."
+					"These will be unfollowed (not deleted). A backup is saved\n" +
+					"first — press R afterwards to restore, or use Spotify's\n" +
+					"90-day recovery page."
 				a.modal.ShowConfirm("Remove Empty Playlists", emptyMsg, components.ActionDeleteEmptyPlaylists, "")
 			}
 		}
@@ -722,7 +726,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.playlist.Items = nil
 		a.playlist.Total = 0
 		a.playlist.Loading = true
-		a.status = fmt.Sprintf("Consolidated %d duplicate group(s), removed %d playlist(s)", msg.MergedCount, msg.DeletedCount)
+		a.status = fmt.Sprintf("Consolidated %d group(s), removed %d playlist(s) — press R to restore", msg.MergedCount, msg.DeletedCount)
 		if a.client != nil {
 			return a, FetchPlaylistsCmd(a.client, 0)
 		}
@@ -731,7 +735,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.playlist.Items = nil
 		a.playlist.Total = 0
 		a.playlist.Loading = true
-		a.status = fmt.Sprintf("Deleted %d empty playlist(s)", msg.DeletedCount)
+		a.status = fmt.Sprintf("Deleted %d empty playlist(s) — press R to restore", msg.DeletedCount)
+		if a.client != nil {
+			return a, FetchPlaylistsCmd(a.client, 0)
+		}
+		return a, nil
+	case PlaylistsRestoredMsg:
+		a.playlist.Items = nil
+		a.playlist.Total = 0
+		a.playlist.Loading = true
+		a.status = fmt.Sprintf("Restored %d playlist(s) (%d re-followed, %d recreated, %d failed)",
+			msg.Refollowed+msg.Recreated, msg.Refollowed, msg.Recreated, msg.Failed)
 		if a.client != nil {
 			return a, FetchPlaylistsCmd(a.client, 0)
 		}
@@ -1151,6 +1165,12 @@ func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.status = "Deleting empty playlists..."
 				if a.client != nil && len(empty) > 0 {
 					return a, DeleteEmptyPlaylistsCmd(a.client, empty)
+				}
+			case components.ActionRestorePlaylists:
+				a.modal.Close()
+				a.status = "Restoring playlists from backup..."
+				if a.client != nil {
+					return a, RestorePlaylistsCmd(a.client)
 				}
 			}
 			a.modal.Close()
@@ -1598,6 +1618,21 @@ func (a App) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.modal.TargetID = a.playlist.CurrentID // source playlist
 			}
 		}
+	case "R":
+		// Restore playlists removed by a previous merge/cleanup, using the
+		// most recent on-disk backup.
+		bf, path, err := sp.LoadLatestBackup()
+		if err != nil {
+			a.status = "No playlist backup found to restore from"
+			return a, nil
+		}
+		msg := fmt.Sprintf(
+			"Restore %d playlist(s) from backup?\n\n"+
+				"Backup taken: %s\nReason: %s\nFile: %s\n\n"+
+				"Each playlist is re-followed by its original ID, or recreated\n"+
+				"from the backup if it no longer exists on Spotify.",
+			len(bf.Playlists), bf.CreatedAt, bf.Reason, path)
+		a.modal.ShowConfirm("Restore Playlists", msg, components.ActionRestorePlaylists, "")
 	case "esc", "h":
 		if !a.playlist.Back() {
 			a.focus = model.FocusSidebar

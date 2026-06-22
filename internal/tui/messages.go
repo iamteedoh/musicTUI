@@ -125,9 +125,18 @@ type TrackMovedMsg struct {
 type DuplicatesConsolidatedMsg struct {
 	MergedCount  int
 	DeletedCount int
+	BackupPath   string
 }
 type EmptyPlaylistsDeletedMsg struct {
 	DeletedCount int
+	BackupPath   string
+}
+
+// PlaylistsRestoredMsg reports the result of restoring playlists from a backup.
+type PlaylistsRestoredMsg struct {
+	Refollowed int
+	Recreated  int
+	Failed     int
 }
 
 // Commands that fetch data asynchronously
@@ -484,6 +493,17 @@ func ConsolidateDuplicatesCmd(client *sp.Client, groups [][]model.Playlist) tea.
 		ctx := context.Background()
 		var mergedCount, deletedCount int
 
+		// Snapshot every playlist that is about to be unfollowed so it can be
+		// restored in-app (press R in the Playlists view) if this was a
+		// mistake. Failure to back up is non-fatal but reported via the path.
+		var toRemove []model.Playlist
+		for _, group := range groups {
+			if len(group) >= 2 {
+				toRemove = append(toRemove, group[1:]...)
+			}
+		}
+		backupPath, _ := client.SnapshotPlaylists(ctx, toRemove, "consolidate-duplicates")
+
 		for _, group := range groups {
 			if len(group) < 2 {
 				continue
@@ -552,13 +572,15 @@ func ConsolidateDuplicatesCmd(client *sp.Client, groups [][]model.Playlist) tea.
 			mergedCount++
 		}
 
-		return DuplicatesConsolidatedMsg{MergedCount: mergedCount, DeletedCount: deletedCount}
+		return DuplicatesConsolidatedMsg{MergedCount: mergedCount, DeletedCount: deletedCount, BackupPath: backupPath}
 	}
 }
 
 func DeleteEmptyPlaylistsCmd(client *sp.Client, playlists []model.Playlist) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
+		// Back up before unfollowing so the action is recoverable in-app.
+		backupPath, _ := client.SnapshotPlaylists(ctx, playlists, "delete-empty-playlists")
 		var count int
 		for _, pl := range playlists {
 			if err := client.DeletePlaylist(ctx, pl.ID); err != nil {
@@ -566,6 +588,21 @@ func DeleteEmptyPlaylistsCmd(client *sp.Client, playlists []model.Playlist) tea.
 			}
 			count++
 		}
-		return EmptyPlaylistsDeletedMsg{DeletedCount: count}
+		return EmptyPlaylistsDeletedMsg{DeletedCount: count, BackupPath: backupPath}
+	}
+}
+
+// RestorePlaylistsCmd restores playlists from the most recent backup written
+// before a merge/delete. Each playlist is re-followed by its original ID, or
+// recreated from the snapshot if it no longer exists on Spotify.
+func RestorePlaylistsCmd(client *sp.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		bf, _, err := sp.LoadLatestBackup()
+		if err != nil {
+			return DataErrorMsg{Err: fmt.Errorf("loading backup: %w", err)}
+		}
+		refollowed, recreated, failed := client.RestoreFromBackup(ctx, bf)
+		return PlaylistsRestoredMsg{Refollowed: refollowed, Recreated: recreated, Failed: failed}
 	}
 }

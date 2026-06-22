@@ -28,6 +28,7 @@ const (
 	ActionMoveTrack
 	ActionConsolidateDuplicates
 	ActionDeleteEmptyPlaylists
+	ActionRestorePlaylists
 )
 
 type Modal struct {
