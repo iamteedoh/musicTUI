@@ -1,0 +1,22 @@
+# gitleaks configuration for musicTUI
+#
+# Extends the default gitleaks ruleset and adds a small allowlist for
+# values that scan as secrets but are, in fact, well-known public constants.
+title = "musicTUI gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Known-public constants that are not private credentials.
+
+- SboVhoG9s0rNafixCSGGKXAT is the ytmusicapi / YouTube "TV" OAuth client
+  secret. It is a shared public constant baked into yt-dlp, ytmusicapi, and
+  many other open-source projects — not a user secret and not rotatable (it
+  belongs to Google's TV client). It only appears in this repo's git history
+  (internal/ytmusic/ was removed in the Phase D rewrite and no longer exists).
+"""
+regexes = [
+  '''SboVhoG9s0rNafixCSGGKXAT''',
+]
