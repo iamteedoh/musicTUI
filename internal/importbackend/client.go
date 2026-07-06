@@ -1,12 +1,13 @@
-// Package importbackend is the TUI-facing wrapper around the shared
-// github.com/iamteedoh/musictui-import module. Everything runs
-// locally — OAuth loopback, YT Data API calls, Spotify calls,
-// matching, importing. No remote service.
+// Package importbackend is the TUI-facing wrapper around the import
+// engine in internal/importcore/. Everything runs locally — OAuth
+// loopback, YT Data API calls, Spotify calls, matching, importing.
+// No remote service.
 //
 // The package name is kept for historical continuity (v0.2.0 had a
 // remote backend; internal/importbackend/ was the HTTP client for
 // it) — messages.go and app.go references didn't need rewriting
-// when the internals changed.
+// when the internals changed, nor when the import engine moved from
+// a separate module into internal/importcore/.
 package importbackend
 
 import (
@@ -16,11 +17,11 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/iamteedoh/musictui-import/importer"
-	"github.com/iamteedoh/musictui-import/oauth"
-	"github.com/iamteedoh/musictui-import/services/spotify"
-	"github.com/iamteedoh/musictui-import/services/youtube"
-	"github.com/iamteedoh/musictui-import/store"
+	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
+	"github.com/iamteedoh/musicTUI/internal/importcore/oauth"
+	"github.com/iamteedoh/musicTUI/internal/importcore/services/spotify"
+	"github.com/iamteedoh/musicTUI/internal/importcore/services/youtube"
+	"github.com/iamteedoh/musicTUI/internal/importcore/store"
 )
 
 // Client is the TUI-side handle into the shared import module.

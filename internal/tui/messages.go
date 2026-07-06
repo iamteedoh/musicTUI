@@ -13,7 +13,7 @@ import (
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musictui-import/importer"
+	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
 )
 
 // Navigation

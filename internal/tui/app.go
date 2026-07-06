@@ -27,8 +27,8 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musictui-import/importer"
-	"github.com/iamteedoh/musictui-import/oauth"
+	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
+	"github.com/iamteedoh/musicTUI/internal/importcore/oauth"
 )
 
 type App struct {
