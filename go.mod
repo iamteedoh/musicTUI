@@ -13,7 +13,6 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/iamteedoh/musictui-import v0.0.0-00010101000000-000000000000
-	github.com/madelynnblue/go-dsp v1.0.0
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.36.0
 )
