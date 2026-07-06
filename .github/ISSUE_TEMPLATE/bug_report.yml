@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a problem with musicTUI
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out the details
+        below. **Do not paste any tokens, client secrets, or credentials.**
+  - type: input
+    id: version
+    attributes:
+      label: musicTUI version
+      description: The release tag or commit you are running.
+      placeholder: v0.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator
+      placeholder: iTerm2, Ghostty, Kitty, Windows Terminal, ...
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch musicTUI
+        2. Press ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Any error output or the import log. Redact tokens/secrets.
+      render: shell
