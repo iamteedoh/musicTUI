@@ -3,7 +3,7 @@ LDFLAGS     := -s -w
 DIST        := dist
 BRIDGE_BIN  := player-bridge
 
-.PHONY: build build-bridge clean install
+.PHONY: build build-bridge clean install test test-go test-bridge
 
 # ── Default: build single binary with embedded bridge ────
 build: build-bridge
@@ -16,6 +16,14 @@ build: build-bridge
 # ── Build Rust player-bridge ─────────────────────────────
 build-bridge:
 	cd bridge && cargo build --bin $(BRIDGE_BIN) --release
+
+test: test-go test-bridge
+
+test-go:
+	go test ./...
+
+test-bridge:
+	cd bridge && cargo test
 
 # ── Install to ~/.local/bin ──────────────────────────────
 install: build

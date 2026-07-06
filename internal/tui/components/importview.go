@@ -77,6 +77,11 @@ type Import struct {
 	Err error
 }
 
+type ImportErrorAdvice struct {
+	Service string
+	Lines   []string
+}
+
 func NewImport() Import {
 	return Import{Stage: ImportStageIdle}
 }
@@ -359,28 +364,133 @@ func (i Import) viewDone(th theme.Theme, width int) string {
 func (i Import) viewError(th theme.Theme, w int) string {
 	errStyle := lipgloss.NewStyle().Foreground(th.Error).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(w)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	msg := "Unknown error"
 	if i.Err != nil && i.Err.Error() != "" {
 		msg = i.Err.Error()
 	}
+	advice := ImportErrorAdviceFor(i.Err)
 	var b strings.Builder
 	b.WriteString(" " + errStyle.Render("✗ Import failed") + "\n\n")
 	b.WriteString(" " + lipgloss.NewStyle().Foreground(th.Fg).Width(w).Render(msg) + "\n\n")
-	b.WriteString(" " + muted.Italic(true).Render("If the backend is unreachable, check your network. Press Enter to retry."))
-	b.WriteString("\n\n " + RenderHints(th, []Hint{
+	if len(advice.Lines) > 0 {
+		b.WriteString(" " + accent.Render("How to fix:") + "\n")
+		for _, line := range advice.Lines {
+			b.WriteString(" " + muted.Render("• "+line) + "\n")
+		}
+	} else {
+		b.WriteString(" " + muted.Italic(true).Render("Check your network, then press Enter to retry. If it repeats, press c to reconfigure import credentials."))
+	}
+	hints := []Hint{
 		{"Enter", "retry"},
-		{"Esc", "back"},
-	}))
+	}
+	if advice.Service != "" {
+		hints = append(hints, Hint{"r", "reconnect " + serviceDisplayName(advice.Service)})
+	}
+	hints = append(hints,
+		Hint{"c", "reconfigure"},
+		Hint{"Esc", "back"},
+	)
+	b.WriteString("\n\n " + RenderHints(th, hints))
 	return b.String()
 }
 
 // ─────────────────── helpers ───────────────────
 
+func ImportErrorAdviceFor(err error) ImportErrorAdvice {
+	if err == nil {
+		return ImportErrorAdvice{}
+	}
+	raw := err.Error()
+	msg := strings.ToLower(raw)
+	service := inferImportErrorService(msg)
+
+	switch {
+	case strings.Contains(msg, "invalid_grant"):
+		if service == "" {
+			service = "youtube"
+		}
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				fmt.Sprintf("Your saved %s login can no longer be refreshed.", serviceDisplayName(service)),
+				"Press r to reconnect in your browser.",
+				"If reconnecting fails, press c and verify the OAuth client settings.",
+			},
+		}
+	case strings.Contains(msg, "invalid_client") || strings.Contains(msg, "unauthorized_client"):
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				"The OAuth client ID or client secret is being rejected.",
+				"Press c to re-run setup and paste the current OAuth app values.",
+				"Make sure the redirect URI in the provider dashboard matches the wizard.",
+			},
+		}
+	case strings.Contains(msg, "access_denied"):
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				"Browser authorization was denied or canceled.",
+				"Press r to open the sign-in flow again and approve the requested access.",
+			},
+		}
+	case strings.Contains(msg, "403") || strings.Contains(msg, "forbidden"):
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				"The provider refused access for the current app/account.",
+				"For YouTube, enable YouTube Data API v3 and add your account as a test user.",
+				"Then press r to reconnect, or c to reconfigure.",
+			},
+		}
+	case strings.Contains(msg, "429") || strings.Contains(msg, "rate limit"):
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				"The provider is rate limiting requests.",
+				"Wait before retrying, or use a dedicated Spotify import app if Spotify is the limiter.",
+			},
+		}
+	case strings.Contains(msg, "network") || strings.Contains(msg, "timeout") || strings.Contains(msg, "connection refused"):
+		return ImportErrorAdvice{
+			Service: service,
+			Lines: []string{
+				"Check your network connection and provider availability.",
+				"Press Enter to retry when the connection is stable.",
+			},
+		}
+	}
+	return ImportErrorAdvice{}
+}
+
+func inferImportErrorService(msg string) string {
+	switch {
+	case strings.Contains(msg, "youtube") || strings.Contains(msg, "google"):
+		return "youtube"
+	case strings.Contains(msg, "spotify"):
+		return "spotify"
+	default:
+		return ""
+	}
+}
+
+func serviceDisplayName(service string) string {
+	switch service {
+	case "youtube":
+		return "YouTube"
+	case "spotify":
+		return "Spotify"
+	default:
+		return "service"
+	}
+}
+
 // topErrorReasons returns up to `limit` error strings ordered by
 // frequency (most common first). Each string is truncated and has
 // its count suffixed so the Done screen shows, e.g.:
 //
-//	• 429: API rate limit exceeded  (174x)
+//   - 429: API rate limit exceeded  (174x)
 func (i Import) topErrorReasons(limit int) []string {
 	if len(i.ErrorReasons) == 0 {
 		return nil

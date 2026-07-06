@@ -32,36 +32,36 @@ import (
 )
 
 type App struct {
-	config   config.Config
-	theme    theme.Theme
-	width    int
-	height   int
-	focus              model.FocusMode
-	view               model.View
-	showLyrics         bool // toggle inline lyrics in center panel (default: true)
+	config               config.Config
+	theme                theme.Theme
+	width                int
+	height               int
+	focus                model.FocusMode
+	view                 model.View
+	showLyrics           bool // toggle inline lyrics in center panel (default: true)
 	sidebarPlaylistFocus bool // true when sidebar focus is on the playlist section
-	modal    components.Modal
-	onboard  components.Onboard
-	help     components.Help
-	prevView model.View // view to return to when ? help is closed
-	sidebar  components.Sidebar
-	home     components.Home
-	library  components.Library
-	search   components.Search
-	playlist components.Playlists
-	playing  components.NowPlaying
-	viz      *components.MiniVisualizer
-	lyrics   components.Lyrics
-	artwork  components.Artwork
-	settings components.Settings
-	importv            components.Import
-	importsetup        components.ImportSetup
-	importClient       *importbackend.Client
-	importEvents       <-chan importer.Event // active import event stream; nil when no import is running
-	importEventsCancel context.CancelFunc    // cancels the importer goroutine on view exit
-	playback model.PlaybackState
-	queue    model.Queue
-	status   string
+	modal                components.Modal
+	onboard              components.Onboard
+	help                 components.Help
+	prevView             model.View // view to return to when ? help is closed
+	sidebar              components.Sidebar
+	home                 components.Home
+	library              components.Library
+	search               components.Search
+	playlist             components.Playlists
+	playing              components.NowPlaying
+	viz                  *components.MiniVisualizer
+	lyrics               components.Lyrics
+	artwork              components.Artwork
+	settings             components.Settings
+	importv              components.Import
+	importsetup          components.ImportSetup
+	importClient         *importbackend.Client
+	importEvents         <-chan importer.Event // active import event stream; nil when no import is running
+	importEventsCancel   context.CancelFunc    // cancels the importer goroutine on view exit
+	playback             model.PlaybackState
+	queue                model.Queue
+	status               string
 
 	// viewCache memoizes the expensive lipgloss panel renders (borders/margins)
 	// for regions that don't change every frame. Pointer so it persists across
@@ -98,30 +98,30 @@ type App struct {
 func NewApp(cfg config.Config, bridgePath string, version string) App {
 	th := theme.FromName(cfg.Theme)
 	app := App{
-		config:   cfg,
-		theme:    th,
-		version:  version,
-		focus:    model.FocusSidebar,
-		view:     model.ViewHome,
-		sidebar:  components.NewSidebar(),
-		home:     components.NewHome(),
-		onboard:  components.NewOnboard(),
-		help:     components.NewHelp(),
-		library:  components.NewLibrary(),
-		search:   components.NewSearch(),
-		playlist: components.NewPlaylists(),
-		playing:  components.NewNowPlaying(),
-		viz:      components.NewMiniVisualizer(),
-		cache:      &viewCache{},
-		lyrics:   components.NewLyrics(),
-		artwork:  components.NewArtwork(),
-		settings: components.NewSettings(),
+		config:      cfg,
+		theme:       th,
+		version:     version,
+		focus:       model.FocusSidebar,
+		view:        model.ViewHome,
+		sidebar:     components.NewSidebar(),
+		home:        components.NewHome(),
+		onboard:     components.NewOnboard(),
+		help:        components.NewHelp(),
+		library:     components.NewLibrary(),
+		search:      components.NewSearch(),
+		playlist:    components.NewPlaylists(),
+		playing:     components.NewNowPlaying(),
+		viz:         components.NewMiniVisualizer(),
+		cache:       &viewCache{},
+		lyrics:      components.NewLyrics(),
+		artwork:     components.NewArtwork(),
+		settings:    components.NewSettings(),
 		importv:     components.NewImport(),
 		importsetup: components.NewImportSetup(),
-		showLyrics: true,
-		playback:   model.PlaybackState{Volume: cfg.Volume},
-		queue:      model.NewQueue(),
-		bridgePath: bridgePath,
+		showLyrics:  true,
+		playback:    model.PlaybackState{Volume: cfg.Volume},
+		queue:       model.NewQueue(),
+		bridgePath:  bridgePath,
 	}
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
@@ -1610,6 +1610,21 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a.handleImportEnter()
 		case "r":
+			if a.importv.Stage == components.ImportStageError && a.importClient != nil {
+				advice := components.ImportErrorAdviceFor(a.importv.Err)
+				if advice.Service != "" {
+					a.importv.Stage = components.ImportStageAwaitingAuth
+					a.importv.AuthBrowserOpenedFor = advice.Service
+					a.importv.Err = nil
+					if advice.Service == "youtube" {
+						a.importv.YouTubeConnected = false
+					}
+					if advice.Service == "spotify" {
+						a.importv.SpotifyConnected = false
+					}
+					return a, ReauthServiceCmd(a.importClient, advice.Service)
+				}
+			}
 			// Retry the OAuth flow for whichever service still needs auth.
 			if a.importv.Stage == components.ImportStageAwaitingAuth && a.importClient != nil {
 				if next := a.importv.NextServiceToConnect(); next != "" {
@@ -2166,7 +2181,7 @@ func (a App) View() string {
 	default:
 		viewContent = lipgloss.NewStyle().
 			Foreground(th.FgMuted).Italic(true).
-				Render("  Coming soon...")
+			Render("  Coming soon...")
 	}
 
 	// Status message — cap width so a very long err.Error() from any

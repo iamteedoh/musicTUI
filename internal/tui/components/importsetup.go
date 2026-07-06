@@ -618,16 +618,14 @@ func (w ImportSetup) viewSpotifyPasteCreds(th theme.Theme) string {
 
 func (w ImportSetup) viewDone(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(64)
-	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(64)
 	good := lipgloss.NewStyle().Foreground(th.Success).Bold(true)
 	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	warn := lipgloss.NewStyle().Foreground(th.Warning).Bold(true)
 	var b strings.Builder
 	b.WriteString(good.Render("✓ Setup complete"))
 	b.WriteString("\n\n")
-	b.WriteString(body.Render("Credentials saved to ~/.config/musicTUI/config.toml."))
-	b.WriteString("\n" + body.Render("OAuth tokens will be encrypted and stored at"))
-	b.WriteString("\n" + muted.Render("~/.config/musicTUI/import/") + ".")
+	b.WriteString(body.Render("Credentials saved to the musicTUI config file in your OS user config directory."))
+	b.WriteString("\n" + body.Render("OAuth tokens are stored locally under the musicTUI import token directory."))
 	b.WriteString("\n\n")
 	b.WriteString(accent.Render("Heads-up on the Google sign-in screen:") + "\n")
 	b.WriteString(body.Render("When you start the import, your browser will open a Google sign-in page that may say:"))

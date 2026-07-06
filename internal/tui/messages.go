@@ -321,7 +321,23 @@ func CheckServicesCmd(client *importbackend.Client) tea.Cmd {
 // flow for `service`, and persists the resulting token. Blocks
 // until the browser redirects back or ctx times out (~10 min).
 func AuthServiceCmd(client *importbackend.Client, service string) tea.Cmd {
+	return authServiceCmd(client, service, false)
+}
+
+// ReauthServiceCmd discards the cached token for a service, then opens
+// a fresh OAuth flow. Use this when a provider reports invalid_grant or
+// another token-refresh failure; retrying the stale token would loop.
+func ReauthServiceCmd(client *importbackend.Client, service string) tea.Cmd {
+	return authServiceCmd(client, service, true)
+}
+
+func authServiceCmd(client *importbackend.Client, service string, clearFirst bool) tea.Cmd {
 	return func() tea.Msg {
+		if clearFirst {
+			if err := client.DeleteServiceToken(service); err != nil {
+				return ServiceAuthErrorMsg{Service: service, Err: err}
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		var err error

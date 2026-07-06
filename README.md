@@ -18,7 +18,6 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - [Setting Up Spotify](#setting-up-spotify)
   - [Step 1: Create a Spotify Developer App](#step-1-create-a-spotify-developer-app)
   - [Step 2: Add Your Account to the App](#step-2-add-your-account-to-the-app)
-  - [Step 3: Configure musicTUI](#step-3-configure-musictui)
 - [First Launch](#first-launch)
 - [Getting Around the App](#getting-around-the-app)
   - [The Screen Layout](#the-screen-layout)
@@ -51,6 +50,8 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - [Keyboard Shortcuts Reference](#keyboard-shortcuts-reference)
 - [Troubleshooting](#troubleshooting)
 - [Building from Source](#building-from-source-detailed)
+- [Testing and Smoke Checks](#testing-and-smoke-checks)
+- [Importing from YouTube Music](#importing-from-youtube-music)
 - [Roadmap](#roadmap)
 - [License](#license)
 
@@ -161,7 +162,12 @@ The wizard hands you the exact field values to paste, opens the Spotify dashboar
 
 The steps in Section 1 and Section 2 are there for reference if you want to understand what's happening, or to set up the app manually.
 
-> If you'd rather edit the config file by hand: create `~/.config/musicTUI/config.toml` (Linux/Mac) or `%APPDATA%\musicTUI\config.toml` (Windows) with:
+> If you'd rather edit the config file by hand, create the config file for your OS:
+> - **macOS**: `~/Library/Application Support/musicTUI/config.toml`
+> - **Linux**: `~/.config/musicTUI/config.toml`
+> - **Windows**: `%APPDATA%\musicTUI\config.toml`
+>
+> Then add:
 > ```toml
 > [spotify]
 > client_id = "YOUR_CLIENT_ID"
@@ -337,8 +343,8 @@ From either location, press **Enter** on a playlist to see its tracks.
 
 1. Highlight a playlist in the sidebar's playlist section.
 2. Press **d**.
-3. If the playlist is **empty**, it is deleted immediately.
-4. If the playlist **has tracks**, a popup asks you to confirm: press **y** to delete or **n** to cancel.
+3. A popup asks you to confirm: press **y** to remove it from your library or **n** to cancel.
+4. Spotify's API does not truly delete playlists; it unfollows/removes them from your library.
 
 ### Adding a Track to a Playlist
 
@@ -368,15 +374,15 @@ If you have multiple playlists with the same name, musicTUI can merge them into 
 
 - When you open the app, it checks for duplicates (if enabled in Settings).
 - A popup lists the duplicates and asks: **"Merge duplicates into one playlist each?"**
-- Press **y** to merge. Tracks from all copies are combined (duplicates removed), and the extra playlists are deleted.
+- Press **y** to merge. Tracks from all copies are combined (duplicates removed), and the extra playlists are unfollowed/removed from your library.
 - Press **n** to skip.
 
 ### Empty Playlist Cleanup
 
 After checking for duplicates, musicTUI also checks for empty playlists (0 tracks).
 
-- A popup lists the empty playlists and asks: **"Delete all empty playlists?"**
-- Press **y** to delete them all, or **n** to keep them.
+- A popup lists the empty playlists and asks whether to remove them from your library.
+- Press **y** to unfollow/remove them all, or **n** to keep them.
 
 ---
 
@@ -453,17 +459,15 @@ playerctl --player=musicTUI next
 
 ## Configuration File
 
-musicTUI stores its configuration at:
+musicTUI stores its configuration at the OS user config directory:
 
-- **Linux / Mac**: `~/.config/musicTUI/config.toml`
+- **macOS**: `~/Library/Application Support/musicTUI/config.toml`
+- **Linux**: `~/.config/musicTUI/config.toml`
 - **Windows**: `%APPDATA%\musicTUI\config.toml`
 
 Here is a complete example with all available options:
 
 ```toml
-[spotify]
-client_id = "your_client_id_here"
-
 # Visual theme: "nord", "dracula", "catppuccin", "gruvbox", "tokyonight"
 theme = "nord"
 
@@ -472,6 +476,9 @@ volume = 75
 
 # Check for duplicate/empty playlists on startup
 check_duplicates = true
+
+[spotify]
+client_id = "your_client_id_here"
 ```
 
 ---
@@ -564,10 +571,21 @@ Your saved login has expired. Press **Ctrl+L** to log in again. The old credenti
 ### Playlists show 0 tracks / "Forbidden" error
 Your Spotify Developer App needs your account added under **User Management**. See [Step 2 of Setting Up Spotify](#step-2-add-your-account-to-the-app).
 
+### Import fails with `invalid_grant`
+
+Your saved provider login can no longer be refreshed. This usually means
+access was revoked, the refresh token expired, or the OAuth app values changed.
+
+On the Import error screen, press **r** to reconnect the affected service in
+your browser. If reconnecting still fails, press **c** to re-run import setup
+and verify the OAuth client ID, client secret, redirect URI, enabled APIs, and
+test-user settings.
+
 ### No sound / track stays paused at 0:00
 The audio engine is embedded in the binary and extracted automatically on first run. If playback doesn't start, check the bridge log:
 
-- **Linux / Mac**: `~/.cache/musicTUI/bridge.log`
+- **macOS**: `~/Library/Caches/musicTUI/bridge.log`
+- **Linux**: `~/.cache/musicTUI/bridge.log`
 - **Windows**: `%LOCALAPPDATA%\musicTUI\bridge.log`
 
 The log captures everything the audio bridge writes to stderr — librespot auth errors, audio device failures, and so on. Share the last ~30 lines if you report an issue.
@@ -614,83 +632,70 @@ make install
 make clean
 ```
 
-### Building for a Specific Platform
-
-```bash
-make build-linux     # Linux (amd64)
-make build-macos     # macOS (ARM + Intel)
-make build-windows   # Windows (amd64)
-```
+The current Makefile builds for the host platform. Release packaging and
+cross-platform archives are handled outside this Makefile.
 
 ---
 
-## Importing from YouTube Music / Apple Music
+## Testing and Smoke Checks
 
-musicTUI can import your playlists, liked songs, and library albums
-from YouTube Music or Apple Music into your Spotify library as new
-playlists (prefixed with `[YT]` or `[AM]` so you can spot the imports
-and clean up later if anything goes wrong).
+From the repository root:
 
-Open the **Import** screen from the left sidebar and pick a source.
-
-### YouTube Music (no setup required)
-
-1. Select **YouTube Music**, press Enter.
-2. musicTUI shows a short code and a URL — typically
-   `https://www.google.com/device` or `youtube.com/activate`.
-3. Open that URL on any phone or laptop, enter the code, sign in to
-   your Google account, approve the request.
-4. musicTUI fetches your library summary; press Enter again to start
-   the import.
-
-Your Spotify library will get new playlists prefixed with `[YT]`.
-
-### Apple Music (one-time setup)
-
-Because Apple's MusicKit framework can't be called from Go directly,
-the Apple Music import requires two one-time setup tasks: an Apple
-Developer Program membership ($99/yr) and hosting a tiny HTML page
-somewhere over HTTPS. Once set up, the end-user flow is a single
-browser click.
-
-**1. Get your Apple Developer credentials**
-
-- Enroll in the Apple Developer Program at
-  [developer.apple.com](https://developer.apple.com).
-- Create a MusicKit identifier and Media Key under Certificates, IDs
-  & Profiles.
-- Download the `.p8` private key. Keep it safe — it can't be re-
-  downloaded.
-- Generate a developer token (a JWT signed with that key). Apple's
-  docs have the format; there are plenty of ES256-JWT tools. The
-  token is valid for up to 180 days.
-
-**2. Host the auth page**
-
-The `page/apple-auth/` directory in this repo is a single static HTML
-file that uses MusicKit JS to get a Music User Token from the user,
-then POSTs it to a local callback URL musicTUI is listening on.
-
-- Serve `page/apple-auth/index.html` over HTTPS anywhere you control
-  (your homelab, S3, Netlify, GitHub Pages, etc.).
-- MusicKit JS requires HTTPS; `localhost` will also work for testing.
-
-**3. Configure musicTUI**
-
-Edit `~/.config/musicTUI/config.toml` (Linux/Mac) or
-`%APPDATA%\musicTUI\config.toml` (Windows) and add:
-
-```toml
-[apple_music]
-developer_token = "eyJ...your ES256-signed JWT..."
-auth_page_url = "https://music-auth.yourhomelab.example/"
-callback_port = 0  # 0 = auto-pick a free port each session
+```bash
+go test ./...
+cd bridge
+cargo test
 ```
 
-Restart musicTUI. On the Import screen, the Apple Music option will
-flip from `⚠ needs setup` to selectable. Pressing Enter opens your
-hosted auth page in the user's browser; after they complete MusicKit
-sign-in, the token is POSTed back and the import proceeds.
+If your environment blocks the default Go build cache, point it at a
+writable directory:
+
+```bash
+GOCACHE=/tmp/musicTUI-go-build-cache go test ./...
+```
+
+For manual verification, use the checklist in
+[`docs/SMOKE_TEST.md`](docs/SMOKE_TEST.md).
+
+---
+
+## Importing from YouTube Music
+
+musicTUI can import your YouTube Music playlists into your Spotify library
+as new playlists. Existing Spotify playlists are not touched.
+
+Open the **Import** screen from the left sidebar.
+
+### One-time setup
+
+The import flow runs entirely on your computer, but it needs OAuth
+credentials for Google Cloud and Spotify. The in-app setup wizard walks
+through creating those apps and saving the values locally.
+
+1. Open **Import**.
+2. Press **Enter** on the setup screen.
+3. Follow the wizard to create/verify your Google Cloud project, enable
+   YouTube Data API v3, configure OAuth, and choose whether to reuse your
+   playback Spotify app or create a dedicated import app.
+4. Paste the requested client values into the wizard. Do not paste real
+   credentials into shared docs, tickets, screenshots, or logs.
+5. Press **Enter** to return to Import.
+
+### Running an import
+
+1. Press **Enter** on the Import screen.
+2. Your browser opens for YouTube authorization, then Spotify authorization
+   if needed.
+3. After both services are connected, musicTUI reads your YouTube Music
+   library summary.
+4. Press **Enter** again to start creating Spotify playlists.
+
+Tokens and import logs are stored locally under the musicTUI config/cache
+directories. Do not share token files or logs that contain account-specific
+details.
+
+> Note: `page/apple-auth/` is a static helper page from earlier Apple Music
+> exploration. Apple Music import is not currently wired into the TUI.
 
 ---
 

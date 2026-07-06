@@ -78,6 +78,18 @@ func (c *Client) Services() (ServicesStatus, error) {
 	return out, nil
 }
 
+// DeleteServiceToken removes the cached OAuth token for a service so the
+// next flow performs a fresh browser authorization instead of repeatedly
+// trying to refresh a stale/revoked token.
+func (c *Client) DeleteServiceToken(service string) error {
+	switch service {
+	case "youtube", "spotify":
+		return c.store.Delete(service)
+	default:
+		return fmt.Errorf("unknown service %q", service)
+	}
+}
+
 // AuthYouTube runs the Google OAuth loopback flow end-to-end and
 // persists the resulting token. Blocks until the browser redirects
 // back or ctx times out.
