@@ -261,22 +261,33 @@ func (m Modal) viewConfirm(th theme.Theme, width int) string {
 	b.WriteString(lipgloss.NewStyle().Foreground(th.Border).Render(strings.Repeat("─", width)) + "\n")
 	b.WriteString("\n")
 
-	// Wrap long messages
+	// Word-wrap each paragraph to the inner width so long sentences break on
+	// spaces, not mid-word. Blank lines from the caller are kept as paragraph
+	// separators. Background matches the box so wrap-padding has no seam.
+	msgStyle := lipgloss.NewStyle().Foreground(th.Fg).Background(th.Surface).Width(width)
 	for _, line := range strings.Split(m.Message, "\n") {
-		b.WriteString(lipgloss.NewStyle().Foreground(th.Fg).Render(line) + "\n")
+		if line == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString(msgStyle.Render(line) + "\n")
 	}
 	b.WriteString("\n")
 
-	// Match the hint row format used everywhere else in the app.
+	// Key hints, centered under the message. Same segment format used
+	// elsewhere in the app.
 	hint := lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true)
-	keyY := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("y")
-	keyN := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("n")
-	keyEsc := lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render("Esc")
-	b.WriteString(
-		keyY + hint.Render(": yes  ·  ") +
-			keyN + hint.Render(": no  ·  ") +
-			keyEsc + hint.Render(": cancel"),
-	)
+	key := func(s string) string {
+		return lipgloss.NewStyle().Foreground(th.Accent).Bold(true).Render(s)
+	}
+	legend := key("y") + hint.Render(": yes  ·  ") +
+		key("n") + hint.Render(": no  ·  ") +
+		key("Esc") + hint.Render(": cancel")
+	b.WriteString(lipgloss.NewStyle().
+		Background(th.Surface).
+		Width(width).
+		Align(lipgloss.Center).
+		Render(legend))
 
 	return b.String()
 }

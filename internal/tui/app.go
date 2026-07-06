@@ -93,6 +93,12 @@ type App struct {
 	// lands with a fresh token (and the engine has been re-seeded), we
 	// re-dispatch PlayTrack for this track once.
 	pendingRetryTrack *model.Track
+
+	// authWaitCancel cancels the in-flight browser-login callback wait (and
+	// its :8888 HTTP server). Held so we can abort a stuck login — e.g. when
+	// the Client ID is wrong and Spotify never redirects back — before it
+	// blocks a fresh attempt on the same port. nil when no wait is active.
+	authWaitCancel context.CancelFunc
 }
 
 func NewApp(cfg config.Config, bridgePath string, version string) App {
@@ -297,14 +303,27 @@ func openBrowser(url string) {
 	_ = cmd.Start()
 }
 
-func (a App) waitForAuthCallbackCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+// errAuthTimeout is returned when the browser login never redirects back
+// within the callback window. The most common cause is a wrong/rejected
+// Spotify Client ID (Spotify shows "Invalid client id" on its own page and
+// never hits our callback), so the message points at the in-app fix.
+var errAuthTimeout = errors.New(`login timed out — if the browser showed "Invalid client id", press Ctrl+O to re-enter your Spotify Client ID`)
 
+func (a App) waitForAuthCallbackCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
 		tok, err := a.auth.WaitForCallback(ctx)
 		if err != nil {
-			return AuthErrorMsg{Err: fmt.Errorf("login failed: %w", err)}
+			switch {
+			case errors.Is(err, context.Canceled):
+				// Wait was aborted deliberately (e.g. Ctrl+O to re-enter the
+				// Client ID, or a fresh login superseding this one). Not an
+				// error — stay quiet so we don't clobber the new state.
+				return nil
+			case errors.Is(err, context.DeadlineExceeded):
+				return AuthErrorMsg{Err: errAuthTimeout}
+			default:
+				return AuthErrorMsg{Err: fmt.Errorf("login failed: %w", err)}
+			}
 		}
 
 		httpClient := a.auth.HTTPClient(tok)
@@ -371,12 +390,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = "Login URL opened — complete auth in browser"
 		a.home.AuthURL = msg.URL
 		a.home.AppOwnerNotPremium = false
-		return a, a.waitForAuthCallbackCmd()
+		// Cancel any previous callback wait so its :8888 server is released
+		// before we bind a new one (rapid re-auth, or Ctrl+O recovery).
+		if a.authWaitCancel != nil {
+			a.authWaitCancel()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		a.authWaitCancel = cancel
+		return a, a.waitForAuthCallbackCmd(ctx)
 	case AuthSuccessMsg:
 		a.client = msg.Client
 		a.home.Username = msg.Username
 		a.home.AuthURL = ""
 		a.home.AppOwnerNotPremium = false
+		if a.authWaitCancel != nil {
+			a.authWaitCancel()
+			a.authWaitCancel = nil
+		}
 		a.accessToken = msg.AccessToken
 		a.status = "" // Auth info shown in home view and title bar
 
@@ -411,7 +441,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stale-session retry failed — clear the pending track so we
 		// don't loop, and surface a clean status message.
 		a.pendingRetryTrack = nil
-		a.status = "Auth error: " + msg.Err.Error()
+		if a.authWaitCancel != nil {
+			a.authWaitCancel()
+			a.authWaitCancel = nil
+		}
+		// The login is over (failed/timed out), so stop showing the
+		// "waiting in browser" URL block. errAuthTimeout is already
+		// self-contained and actionable, so show it verbatim; prefix
+		// other auth errors.
+		a.home.AuthURL = ""
+		if errors.Is(msg.Err, errAuthTimeout) {
+			a.status = msg.Err.Error()
+		} else {
+			a.status = "Auth error: " + msg.Err.Error()
+		}
 		return a, nil
 	case AppOwnerNotPremiumMsg:
 		// Login worked but Spotify is blocking every API call because the
@@ -607,9 +650,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					dupMsg += "  " + n + "\n"
 				}
 				dupMsg += "\nMerge into one playlist each?\n" +
-					"Extras will be unfollowed (not deleted). A backup is saved\n" +
-					"first — press R afterwards to restore, or use Spotify's\n" +
-					"90-day recovery page."
+					"Extras will be unfollowed (not deleted). A backup is saved first — " +
+					"press R afterwards to restore, or use Spotify's 90-day recovery page."
 				a.modal.ShowConfirm("Merge Duplicate Playlists", dupMsg, components.ActionConsolidateDuplicates, "")
 				return a, nil
 			}
@@ -619,9 +661,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					emptyMsg += fmt.Sprintf("  \"%s\"\n", pl.Name)
 				}
 				emptyMsg += "\nRemove them from your library?\n" +
-					"These will be unfollowed (not deleted). A backup is saved\n" +
-					"first — press R afterwards to restore, or use Spotify's\n" +
-					"90-day recovery page."
+					"These will be unfollowed (not deleted). A backup is saved first — " +
+					"press R afterwards to restore, or use Spotify's 90-day recovery page."
 				a.modal.ShowConfirm("Remove Empty Playlists", emptyMsg, components.ActionDeleteEmptyPlaylists, "")
 			}
 		}
@@ -984,6 +1025,23 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.status = "Opening browser for Spotify login..."
 		return a, a.startInteractiveAuthCmd()
+	case "ctrl+o":
+		// In-app recovery for a wrong/rejected Spotify Client ID (MUS-12):
+		// abort any stuck login wait (freeing :8888) and reopen the setup
+		// wizard on the Client ID step, pre-filled, so the user can paste a
+		// correct one. Finishing the wizard saves it, rebuilds auth, and
+		// re-fires login via the existing onboarding path.
+		if a.authWaitCancel != nil {
+			a.authWaitCancel()
+			a.authWaitCancel = nil
+		}
+		a.home.AuthURL = ""
+		a.status = ""
+		a.onboard.StartAtClientID(a.config.Spotify.ClientID)
+		// The wizard opens straight on the paste step, so send the user to
+		// where the Client ID lives at the same time.
+		openBrowser("https://developer.spotify.com/dashboard")
+		return a, nil
 	case "q":
 		if a.view != model.ViewSearch || !a.isSearchInputFocused() {
 			return a, tea.Quit
@@ -1185,6 +1243,11 @@ func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s {
 	case "enter", "right", "l":
 		a.onboard.Next()
+		if a.onboard.OnFinalStep() {
+			// Landing on the paste-Client-ID step — take the user straight
+			// to where the Client ID lives so they don't have to hunt.
+			openBrowser("https://developer.spotify.com/dashboard")
+		}
 		return a, nil
 	case "o", "O":
 		if a.onboard.Step == 1 {

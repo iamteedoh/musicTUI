@@ -47,6 +47,7 @@ var helpGroups = []helpGroup{
 			{"Ctrl+C", "quit immediately"},
 			{"q", "quit (not while typing)"},
 			{"Ctrl+L", "log in / open setup wizard"},
+			{"Ctrl+O", "re-enter Spotify Client ID (fix login)"},
 			{"Ctrl+U", "install available update"},
 			{"?", "open this help"},
 			{"Esc", "close help / go back"},

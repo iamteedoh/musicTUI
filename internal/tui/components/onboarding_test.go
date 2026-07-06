@@ -36,6 +36,26 @@ func TestOnboardStartAndNavigationBounds(t *testing.T) {
 	}
 }
 
+func TestOnboardStartAtClientIDPrefillsFinalStep(t *testing.T) {
+	o := NewOnboard()
+	o.StartAtClientID("existing_bad_id")
+
+	if !o.Active {
+		t.Fatal("StartAtClientID() did not activate onboarding")
+	}
+	if !o.OnFinalStep() {
+		t.Fatalf("Step = %d, want final step %d", o.Step, TotalSteps-1)
+	}
+	if got := o.ClientID(); got != "existing_bad_id" {
+		t.Fatalf("ClientID() = %q, want the pre-filled value", got)
+	}
+	// Cursor is at the end, so editing (backspace) acts on the pre-filled value.
+	o.Backspace()
+	if got := o.ClientID(); got != "existing_bad_i" {
+		t.Fatalf("ClientID() after Backspace() = %q, want existing_bad_i", got)
+	}
+}
+
 func TestOnboardOnlyAcceptsInputOnFinalStep(t *testing.T) {
 	o := NewOnboard()
 	o.Start()

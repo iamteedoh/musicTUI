@@ -23,6 +23,10 @@ type Onboard struct {
 // progress dot row without the caller passing it around.
 const TotalSteps = 5
 
+// spotifyDashboardURL is where a user's Client ID lives (under their app's
+// Settings). Surfaced on the paste step and opened for them automatically.
+const spotifyDashboardURL = "https://developer.spotify.com/dashboard"
+
 func NewOnboard() Onboard {
 	return Onboard{}
 }
@@ -34,6 +38,18 @@ func (o *Onboard) Start() {
 	o.Step = 0
 	o.ClientIDInput = ""
 	o.CursorPos = 0
+	o.Error = ""
+}
+
+// StartAtClientID reopens the wizard directly on the final "paste Client ID"
+// step with the field pre-filled. Use for in-app recovery when a Client ID is
+// already configured but wrong or rejected (Spotify's "Invalid client id"),
+// so the user can correct it without walking the whole wizard again.
+func (o *Onboard) StartAtClientID(current string) {
+	o.Active = true
+	o.Step = TotalSteps - 1
+	o.ClientIDInput = current
+	o.CursorPos = len(current)
 	o.Error = ""
 }
 
@@ -243,8 +259,13 @@ func (o Onboard) viewAddUser(th theme.Theme) string {
 func (o Onboard) viewPasteClientID(th theme.Theme) string {
 	body := lipgloss.NewStyle().Foreground(th.Fg).Width(60)
 	muted := lipgloss.NewStyle().Foreground(th.FgMuted).Width(60)
+	accent := lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
 	var b strings.Builder
-	b.WriteString(body.Render("Almost there. On your app page, copy the Client ID (a long string of letters and numbers) and paste it below."))
+	b.WriteString(body.Render("Almost there. Your Client ID is on your app's page in the Spotify Developer Dashboard — a long string of letters and numbers. Copy it and paste it below."))
+	b.WriteString("\n\n")
+	b.WriteString(muted.Render("We just opened the dashboard in your browser. If it didn't open, go here (click or copy):"))
+	b.WriteString("\n")
+	b.WriteString(accent.Render(spotifyDashboardURL))
 	b.WriteString("\n\n")
 
 	// Input field with cursor

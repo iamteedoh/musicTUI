@@ -51,7 +51,7 @@ func (h Home) View(th theme.Theme, width, height int) string {
 			dim.Render("   signed in as a Premium account."),
 			dim.Render("2. Delete this app, then create a new one."),
 			dim.Render("3. Set Redirect URI to http://127.0.0.1:8888/callback"),
-			dim.Render("4. Put the new Client ID in your config and press Ctrl+L."),
+			dim.Render("4. Press Ctrl+O and paste the new Client ID."),
 			"",
 			muted.Render("Note: after a subscription change Spotify can take a few"),
 			muted.Render("hours to allow requests again."),
@@ -69,6 +69,9 @@ func (h Home) View(th theme.Theme, width, height int) string {
 			"",
 			muted.Render("If the browser didn't open, visit:"),
 			dim.Render(h.AuthURL),
+			"",
+			muted.Render(`Browser says "Invalid client id"? Your Spotify Client`),
+			muted.Render("ID is wrong — press Ctrl+O to re-enter it."),
 		)
 	} else {
 		prompt := "○ Not connected — press Ctrl+L to log in"
