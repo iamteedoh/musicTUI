@@ -258,9 +258,10 @@ func (i Import) viewLibraryLoaded(th theme.Theme, w int) string {
 
 	var b strings.Builder
 	b.WriteString(" " + accent.Render("Library found:") + "\n\n")
-	b.WriteString(fmt.Sprintf("   %s  %d playlists\n",
+	b.WriteString(fmt.Sprintf("   %s  %d YouTube playlists\n",
 		accent.Render("♪"), len(i.Playlists)))
-	b.WriteString("\n " + muted.Render("Each YouTube Music playlist will be created as a new Spotify playlist with the same name. Existing Spotify playlists are not touched. Non-music tracks fall below the match threshold and are reported as unmatched."))
+	b.WriteString("\n " + muted.Render("This counts EVERY playlist on your YouTube account — including regular video playlists — so it may be far more than your music playlists. Don't worry: each playlist is checked track by track and only actual music (YouTube's Music category) is imported. Playlists with no music are skipped entirely and never reach Spotify."))
+	b.WriteString("\n\n " + muted.Render("Each imported playlist becomes a new Spotify playlist with the same name. Existing Spotify playlists are not touched. Tracks that can't be confidently matched are reported as unmatched rather than replaced with a wrong version."))
 	b.WriteString("\n\n " + RenderHints(th, []Hint{
 		{"Enter", "start import"},
 		{"Esc", "cancel"},
