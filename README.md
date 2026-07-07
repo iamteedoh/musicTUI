@@ -89,7 +89,8 @@ This is the easiest way. You download the app and run it — no compiling, no se
 
 1. Go to the [Releases page](https://github.com/iamteedoh/musicTUI/releases/latest).
 2. Download the file for your system:
-   - **Linux**: `musicTUI-linux-amd64.tar.gz`
+   - **Linux (Intel/AMD, most PCs)**: `musicTUI-linux-amd64.tar.gz`
+   - **Linux (ARM — Raspberry Pi 4/5, ARM servers)**: `musicTUI-linux-arm64.tar.gz`
    - **Mac (Apple Silicon / M1-M4)**: `musicTUI-darwin-arm64.tar.gz`
    - **Mac (Intel)**: `musicTUI-darwin-amd64.tar.gz`
    - **Windows**: `musicTUI-windows-amd64.zip`
