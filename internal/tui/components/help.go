@@ -80,7 +80,7 @@ var helpGroups = []helpGroup{
 		},
 	},
 	{
-		"Library / Search / Playlists",
+		"Liked Songs / Search / Playlists",
 		[]Hint{
 			{"Enter", "play selected track"},
 			{"a", "add track to a playlist"},
