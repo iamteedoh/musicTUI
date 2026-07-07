@@ -47,6 +47,14 @@ type ImportSetup struct {
 	SpotifyClientID     string
 	SpotifyClientSecret string
 
+	// Previously-saved secrets. The input fields for secrets start EMPTY
+	// on re-runs of the wizard — pre-filling a masked field the user can
+	// neither read nor easily replace made rotating a secret nearly
+	// impossible. Leaving the input blank keeps the saved value; typing
+	// or pasting replaces it.
+	savedGoogleSecret  string
+	savedSpotifySecret string
+
 	// Which of the two fields the cursor is on (0 = top, 1 = bottom).
 	Field int
 	// CursorPos is a RUNE index into the active field. Rune units (not
@@ -69,9 +77,9 @@ func (w *ImportSetup) Start(googleID, googleSecret, spotifyID, spotifySecret str
 		Active:              true,
 		Step:                0,
 		GoogleClientID:      googleID,
-		GoogleClientSecret:  googleSecret,
 		SpotifyClientID:     spotifyID,
-		SpotifyClientSecret: spotifySecret,
+		savedGoogleSecret:   googleSecret,
+		savedSpotifySecret:  spotifySecret,
 		SpotifyUseDedicated: spotifyID != "",
 	}
 	if w.SpotifyUseDedicated {
@@ -234,10 +242,25 @@ func (w ImportSetup) Trimmed() (gID, gSecret, sClientID, sSecret string) {
 	gID = strings.TrimSpace(w.GoogleClientID)
 	gSecret = strings.TrimSpace(w.GoogleClientSecret)
 	sSecret = strings.TrimSpace(w.SpotifyClientSecret)
+	// Blank secret input = keep the previously saved secret.
+	if gSecret == "" {
+		gSecret = strings.TrimSpace(w.savedGoogleSecret)
+	}
+	if sSecret == "" {
+		sSecret = strings.TrimSpace(w.savedSpotifySecret)
+	}
 	if w.SpotifyUseDedicated {
 		sClientID = strings.TrimSpace(w.SpotifyClientID)
 	}
 	return
+}
+
+// ClearField empties the field under the cursor (Ctrl+U).
+func (w *ImportSetup) ClearField() {
+	if f := w.activeField(); f != nil {
+		*f = ""
+		w.CursorPos = 0
+	}
 }
 
 // Complete reports whether all required credential fields are non-
@@ -496,7 +519,7 @@ func (w ImportSetup) viewGooglePasteCreds(th theme.Theme) string {
 	b.WriteString("\n\n")
 	b.WriteString(w.renderField("Client ID", w.GoogleClientID, w.Field == 0, false, th))
 	b.WriteString("\n")
-	b.WriteString(w.renderField("Client Secret", w.GoogleClientSecret, w.Field == 1, true, th))
+	b.WriteString(w.renderField(w.secretLabel("Client Secret", w.savedGoogleSecret), w.GoogleClientSecret, w.Field == 1, true, th))
 	b.WriteString("\n")
 	b.WriteString(muted.Render("Tab to switch fields. Enter to continue."))
 	return b.String()
@@ -600,7 +623,7 @@ func (w ImportSetup) viewSpotifyPasteCreds(th theme.Theme) string {
 		b.WriteString("\n\n")
 		b.WriteString(w.renderField("Client ID", w.SpotifyClientID, w.Field == 0, false, th))
 		b.WriteString("\n")
-		b.WriteString(w.renderField("Client Secret", w.SpotifyClientSecret, w.Field == 1, true, th))
+		b.WriteString(w.renderField(w.secretLabel("Client Secret", w.savedSpotifySecret), w.SpotifyClientSecret, w.Field == 1, true, th))
 		b.WriteString("\n")
 		b.WriteString(muted.Render("Tab to switch fields. Enter to continue."))
 		return b.String()
@@ -610,7 +633,7 @@ func (w ImportSetup) viewSpotifyPasteCreds(th theme.Theme) string {
 	b.WriteString("\n\n")
 	b.WriteString(body.Render("In your Spotify app's dashboard, click \"View Client Secret\" (or generate one if it's not visible) and paste below."))
 	b.WriteString("\n\n")
-	b.WriteString(w.renderField("Client Secret", w.SpotifyClientSecret, true, true, th))
+	b.WriteString(w.renderField(w.secretLabel("Client Secret", w.savedSpotifySecret), w.SpotifyClientSecret, true, true, th))
 	b.WriteString("\n")
 	b.WriteString(muted.Render("Press Enter to save and finish."))
 	return b.String()
@@ -637,6 +660,15 @@ func (w ImportSetup) viewDone(th theme.Theme) string {
 	b.WriteString(accent.Render("What happens next:") + "\n")
 	b.WriteString(body.Render("Press Enter to return to the Import view. Then Enter again to start the import — browser opens for YouTube first, then Spotify."))
 	return b.String()
+}
+
+// secretLabel annotates a secret field's label when a value is already
+// saved: the input starts empty, and blank means "keep what's saved".
+func (w ImportSetup) secretLabel(base, saved string) string {
+	if strings.TrimSpace(saved) != "" {
+		return base + "  (saved — leave blank to keep, or paste a new one; Ctrl+U clears)"
+	}
+	return base
 }
 
 // renderField draws a single labeled text-input box. Active=true

@@ -103,3 +103,43 @@ func TestImportSetupPasteStripsControlCharacters(t *testing.T) {
 		t.Fatalf("GoogleClientID = %q, want abcdef", w.GoogleClientID)
 	}
 }
+
+// Re-running the wizard must NOT pre-fill secret inputs (a masked value the
+// user can't read or replace made rotating a secret nearly impossible).
+// Blank input keeps the saved secret; typing replaces it; ClearField empties.
+func TestImportSetupSecretKeepReplaceAndClear(t *testing.T) {
+	var w ImportSetup
+	w.Start("gid", "old-google-secret", "", "old-spotify-secret")
+
+	if w.GoogleClientSecret != "" || w.SpotifyClientSecret != "" {
+		t.Fatalf("secret inputs must start empty on re-run, got %q / %q",
+			w.GoogleClientSecret, w.SpotifyClientSecret)
+	}
+
+	// Blank input → saved values are kept.
+	_, gSecret, _, sSecret := w.Trimmed()
+	if gSecret != "old-google-secret" || sSecret != "old-spotify-secret" {
+		t.Fatalf("blank inputs must keep saved secrets, got %q / %q", gSecret, sSecret)
+	}
+	if !w.Complete() {
+		t.Fatal("wizard with saved secrets and blank inputs must count as complete")
+	}
+
+	// Typing a new secret replaces the saved one.
+	w.Step = 8 // Spotify creds step (reuse path: one field)
+	w.Paste("new-spotify-secret")
+	_, _, _, sSecret = w.Trimmed()
+	if sSecret != "new-spotify-secret" {
+		t.Fatalf("typed secret must replace saved one, got %q", sSecret)
+	}
+
+	// ClearField empties the input → back to keeping the saved value.
+	w.ClearField()
+	if w.SpotifyClientSecret != "" || w.CursorPos != 0 {
+		t.Fatalf("ClearField left %q (cursor %d)", w.SpotifyClientSecret, w.CursorPos)
+	}
+	_, _, _, sSecret = w.Trimmed()
+	if sSecret != "old-spotify-secret" {
+		t.Fatalf("after clear, blank must keep saved secret again, got %q", sSecret)
+	}
+}
