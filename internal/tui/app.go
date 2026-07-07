@@ -1260,10 +1260,30 @@ func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.onboard.Error = "Client ID can't be empty"
 				return a, nil
 			}
+			oldPlaybackID := a.config.Spotify.ClientID
 			a.config.Spotify.ClientID = clientID
 			if err := config.Save(a.config); err != nil {
 				a.onboard.Error = "Failed to save config: " + err.Error()
 				return a, nil
+			}
+			// The import's "reuse playback app" path borrows this client
+			// id. If the id changed, the stored import token was issued
+			// under the OLD app and can only fail with invalid_client on
+			// refresh — drop it and rebuild the import client against the
+			// new app. (The import wizard guards its own saves the same
+			// way; this is the other place the effective id can change.)
+			if oldPlaybackID != clientID && a.config.Import.SpotifyClientID == "" && a.importClient != nil {
+				if dir, _ := config.ConfigDir(); dir != "" {
+					dir += "/import"
+					_ = os.Remove(filepath.Join(dir, "spotify.json"))
+					if c, err := importbackend.NewClient(
+						dir,
+						oauth.GoogleConfig{ClientID: a.config.Import.GoogleClientID, ClientSecret: a.config.Import.GoogleClientSecret},
+						oauth.SpotifyConfig{ClientID: clientID, ClientSecret: a.config.Import.SpotifyClientSecret},
+					); err == nil {
+						a.importClient = c
+					}
+				}
 			}
 			a.auth = sp.NewAuth(clientID)
 			a.onboard.Close()
