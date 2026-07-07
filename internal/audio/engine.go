@@ -154,7 +154,7 @@ func (e *Engine) ensureBridge() error {
 	devnull.Close()
 
 	e.started = true
-	go e.readEvents(stderr)
+	go e.readEvents(stderr, e.cmd)
 
 	return nil
 }
@@ -181,7 +181,13 @@ func (e *Engine) writeLog(line string) {
 	}
 }
 
-func (e *Engine) readEvents(r io.Reader) {
+// readEvents drains one bridge subprocess's stderr until it exits. own is
+// the *exec.Cmd this goroutine belongs to: the exit cleanup only clears the
+// engine's state if that bridge is still the current one, so a stale
+// goroutine from an already-replaced bridge (e.g. after SetToken kills it
+// for a re-auth) can't clobber the new, healthy bridge's state — that race
+// intermittently marked the fresh bridge "not running" (MUS-17).
+func (e *Engine) readEvents(r io.Reader, own *exec.Cmd) {
 	scanner := bufio.NewScanner(r)
 	// Bump the buffer size — librespot can occasionally emit very long log
 	// lines (e.g. stack traces) that exceed the default 64KB cap.
@@ -257,21 +263,28 @@ func (e *Engine) readEvents(r io.Reader) {
 		})
 	}
 
-	// Bridge exited — clean up so ensureBridge() can restart it
+	// Bridge exited. Always reap our own process, but only clear the
+	// engine's state (and tell the UI playback stopped) if we are still the
+	// CURRENT bridge — if a new one has already been started, its state is
+	// not ours to touch.
+	_ = own.Wait()
+
 	e.mu.Lock()
-	if e.stdin != nil {
-		e.stdin.Close()
-		e.stdin = nil
-	}
-	if e.cmd != nil && e.cmd.Process != nil {
-		_ = e.cmd.Wait()
+	current := e.cmd == own
+	if current {
+		if e.stdin != nil {
+			e.stdin.Close()
+			e.stdin = nil
+		}
 		e.cmd = nil
+		e.started = false
+		e.playing.Store(false)
 	}
-	e.started = false
-	e.playing.Store(false)
 	e.mu.Unlock()
 
-	e.emit(Event{Kind: "stopped"})
+	if current {
+		e.emit(Event{Kind: "stopped"})
+	}
 }
 
 func (e *Engine) sendCmd(cmd bridgeCommand) error {
@@ -286,7 +299,12 @@ func (e *Engine) sendCmd(cmd bridgeCommand) error {
 	}
 	_, err = fmt.Fprintf(e.stdin, "%s\n", data)
 	if err != nil {
-		// Bridge stdin is broken — mark as not started so next PlayTrack restarts it
+		// Bridge stdin is broken — the process died under us. Kill/clear so
+		// the next ensureBridge() spawns a fresh one (its readEvents
+		// goroutine reaps it; the identity guard keeps a replacement safe).
+		if e.cmd != nil && e.cmd.Process != nil {
+			_ = e.cmd.Process.Kill()
+		}
 		e.stdin = nil
 		e.started = false
 	}
@@ -295,19 +313,31 @@ func (e *Engine) sendCmd(cmd bridgeCommand) error {
 
 // PlayTrack starts playing a track by Spotify base62 ID.
 // Lazily starts the bridge subprocess on first call.
+//
+// If the bridge died since the last command (librespot crash, or killed for
+// a token refresh) the first write fails on the dead pipe — restart the
+// bridge and retry once instead of surfacing a raw "bridge not running" to
+// the user mid-track-change (MUS-17).
 func (e *Engine) PlayTrack(trackID string) error {
-	e.mu.Lock()
-	err := e.ensureBridge()
-	e.mu.Unlock()
-	if err != nil {
-		return err
-	}
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		e.mu.Lock()
+		err = e.ensureBridge()
+		e.mu.Unlock()
+		if err != nil {
+			return err
+		}
 
-	return e.sendCmd(bridgeCommand{
-		Cmd:     "play",
-		Token:   e.token,
-		TrackID: trackID,
-	})
+		err = e.sendCmd(bridgeCommand{
+			Cmd:     "play",
+			Token:   e.token,
+			TrackID: trackID,
+		})
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func (e *Engine) Pause() error {
@@ -359,7 +389,14 @@ func (e *Engine) SetToken(token string) {
 		_ = e.stdin.Close()
 		e.stdin = nil
 	}
-	// readEvents goroutine will observe stderr EOF and reset e.started.
+	// Clear the state NOW rather than waiting for the readEvents goroutine
+	// to observe the kill: a PlayTrack landing in that window used to see
+	// started=true with a dead pipe and fail with "bridge not running"
+	// (MUS-17). The old goroutine still reaps its own process, and the
+	// identity guard keeps it from touching the replacement bridge's state.
+	e.cmd = nil
+	e.started = false
+	e.playing.Store(false)
 }
 
 func (e *Engine) PositionMs() int64 {
@@ -389,7 +426,9 @@ func (e *Engine) Close() {
 	}
 	if e.cmd != nil && e.cmd.Process != nil {
 		_ = e.cmd.Process.Kill()
-		_ = e.cmd.Wait()
+		// Do NOT Wait here: the bridge's readEvents goroutine is the sole
+		// reaper (exec.Cmd.Wait must only ever have one caller — a second
+		// concurrent Wait is a data race).
 		e.cmd = nil
 	}
 	if e.logFile != nil {
