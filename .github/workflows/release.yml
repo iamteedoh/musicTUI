@@ -1,5 +1,8 @@
 name: Release
 
+# Manual/emergency releases: push a tag (e.g. `git tag v0.3.0 && git push
+# origin v0.3.0`) to build and attach the all-platform binaries. The normal
+# path is release-please.yml (merge the release PR); this is the escape hatch.
 on:
   push:
     tags:
@@ -9,131 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            suffix: linux-amd64
-            bridge_bin: player-bridge
-            audio_deps: libasound2-dev
-          - os: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
-            suffix: linux-arm64
-            bridge_bin: player-bridge
-            audio_deps: libasound2-dev
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            suffix: darwin-arm64
-            bridge_bin: player-bridge
-            audio_deps: ""
-          - os: macos-latest
-            goos: darwin
-            goarch: amd64
-            suffix: darwin-amd64
-            bridge_bin: player-bridge
-            audio_deps: ""
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            suffix: windows-amd64
-            bridge_bin: player-bridge.exe
-            audio_deps: ""
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: bridge
-
-      - name: Install Linux audio deps
-        if: matrix.audio_deps != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.audio_deps }}
-
-      - name: Build player-bridge (Rust)
-        working-directory: bridge
-        run: cargo build --bin player-bridge --release
-
-      - name: Embed bridge into Go binary
-        shell: bash
-        env:
-          BRIDGE_BIN: ${{ matrix.bridge_bin }}
-        run: |
-          mkdir -p bridge-bin
-          cp "bridge/target/release/${BRIDGE_BIN}" bridge-bin/
-
-      - name: Build musicTUI (Go with embedded bridge)
-        shell: bash
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          VERSION: ${{ github.ref_name }}
-        run: |
-          EXT=""
-          if [ "${GOOS}" = "windows" ]; then EXT=".exe"; fi
-          go build -ldflags "-s -w -X main.Version=${VERSION}" -o "musicTUI${EXT}" .
-
-      - name: Package (Unix)
-        if: matrix.goos != 'windows'
-        shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
-          SUFFIX: ${{ matrix.suffix }}
-        run: |
-          mkdir -p pkg
-          cp musicTUI pkg/
-          chmod +x pkg/musicTUI
-          cd pkg && tar czf "../musicTUI-${VERSION}-${SUFFIX}.tar.gz" *
-
-      - name: Package (Windows)
-        if: matrix.goos == 'windows'
-        shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
-          SUFFIX: ${{ matrix.suffix }}
-        run: |
-          mkdir -p pkg
-          cp musicTUI.exe pkg/
-          cd pkg && 7z a "../musicTUI-${VERSION}-${SUFFIX}.zip" *
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: musicTUI-${{ github.ref_name }}-${{ matrix.suffix }}
-          path: musicTUI-${{ github.ref_name }}-${{ matrix.suffix }}.*
-          retention-days: 1
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            musicTUI-${{ github.ref_name }}-linux-amd64.tar.gz
-            musicTUI-${{ github.ref_name }}-linux-arm64.tar.gz
-            musicTUI-${{ github.ref_name }}-darwin-arm64.tar.gz
-            musicTUI-${{ github.ref_name }}-darwin-amd64.tar.gz
-            musicTUI-${{ github.ref_name }}-windows-amd64.zip
+  build-release:
+    uses: ./.github/workflows/build-release.yml
+    with:
+      tag: ${{ github.ref_name }}
