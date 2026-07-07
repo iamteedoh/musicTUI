@@ -70,6 +70,7 @@ func TestBrailleGlyphSelection(t *testing.T) {
 	}
 
 	var a Artwork
+	a.SetStyle(StyleBraille)
 	a.LoadURL("u")
 	a.SetFullImage(img, "u")
 	a.SetAlbumInfo("A", "B")
@@ -81,13 +82,68 @@ func TestBrailleGlyphSelection(t *testing.T) {
 	}
 }
 
+// The default block renderer must pick the partition with least color error:
+// a left-white/right-black cell is exactly the left-half glyph ▌ (mask 1010).
+func TestBlocksGlyphSelection(t *testing.T) {
+	th := theme.FromName("")
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{255, 255, 255, 255})
+	img.Set(0, 1, color.RGBA{255, 255, 255, 255})
+	img.Set(1, 0, color.RGBA{0, 0, 0, 255})
+	img.Set(1, 1, color.RGBA{0, 0, 0, 255})
+
+	var a Artwork
+	a.LoadURL("u")
+	a.SetFullImage(img, "u")
+	a.SetAlbumInfo("A", "B")
+
+	out := a.View(th, 3, 4)
+	if !strings.Contains(stripAnsi(out), "▌") {
+		t.Fatalf("left-bright/right-dark cell did not render ▌:\n%q", stripAnsi(out))
+	}
+}
+
+// Regression for the resize crash: uniform (and near-uniform) covers used to
+// hit an integer divide-by-zero in the braille renderer when floating-point
+// rounding left the bright cluster empty. Render flat and noisy covers at
+// many panel sizes in both character styles — must not panic.
+func TestArtworkNoPanicAcrossSizes(t *testing.T) {
+	th := theme.FromName("")
+	imgs := []image.Image{
+		fillImage(64, 64, color.RGBA{37, 37, 37, 255}),
+		fillImage(640, 640, color.RGBA{255, 255, 255, 255}),
+		func() image.Image { // subtle 1-value noise: the ULP trap
+			img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+			for y := 0; y < 64; y++ {
+				for x := 0; x < 64; x++ {
+					v := uint8(100 + (x+y)%2)
+					img.Set(x, y, color.RGBA{v, v, v, 255})
+				}
+			}
+			return img
+		}(),
+	}
+	for _, style := range []ArtworkStyle{StyleBlocks, StyleBraille} {
+		for _, im := range imgs {
+			for _, dim := range [][2]int{{3, 4}, {20, 14}, {80, 50}, {200, 120}} {
+				var a Artwork
+				a.SetStyle(style)
+				a.LoadURL("u")
+				a.SetFullImage(im, "u")
+				a.SetAlbumInfo("A", "B")
+				_ = a.View(th, dim[0], dim[1]) // must not panic
+			}
+		}
+	}
+}
+
 // Hi-res mode must render a placeholder grid and queue the kitty-graphics
 // escapes exactly once per image/size — never on every frame (a re-queue per
 // frame would retransmit the full PNG 60×/second).
 func TestArtworkHiResQueuesOncePerImage(t *testing.T) {
 	th := theme.FromName("")
 	var a Artwork
-	a.SetHiRes(true)
+	a.SetStyle(StyleKitty)
 	a.LoadURL("u1")
 	a.SetFullImage(fillImage(64, 64, color.RGBA{50, 90, 200, 255}), "u1")
 	a.SetAlbumInfo("A", "B")

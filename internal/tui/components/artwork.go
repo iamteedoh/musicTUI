@@ -24,11 +24,13 @@ type Artwork struct {
 	albumName string
 	artist    string
 
-	// Kitty-graphics (hi-res) state. When hiRes is set the panel renders a
-	// Unicode-placeholder grid and queues the protocol escapes (transmit /
+	// style selects the renderer (blocks / braille / kitty pixels).
+	//
+	// Kitty-graphics state: in StyleKitty the panel renders a Unicode-
+	// placeholder grid and queues the protocol escapes (transmit /
 	// placement / delete) in oob; the app layer flushes that queue straight
 	// to the terminal between frames (it must bypass Bubble Tea's diffing).
-	hiRes          bool
+	style          ArtworkStyle
 	kittyID        uint32
 	transmittedURL string // image URL already transmitted under kittyID
 	placedCols     int
@@ -91,12 +93,12 @@ func (a *Artwork) SetImage(_ [][]rgbColor, _, _ int, _ string) {}
 func (a *Artwork) SetGray(_ [][]uint8, _, _ int, _ string)     {}
 func (a *Artwork) SetTrackInfo(_, _, _ string)                 {}
 
-// SetHiRes selects the kitty-graphics renderer (true pixel artwork) instead
-// of quadrant blocks. Call once at startup after terminal detection.
-func (a *Artwork) SetHiRes(v bool) {
+// SetStyle selects the artwork renderer. Call once at startup after
+// terminal detection (see DetectArtworkStyle).
+func (a *Artwork) SetStyle(s ArtworkStyle) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.hiRes = v
+	a.style = s
 }
 
 // TakeOOB drains the queued kitty-protocol escapes. The app layer writes
@@ -168,10 +170,13 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	}
 
 	var imgStr string
-	if a.hiRes {
+	switch a.style {
+	case StyleKitty:
 		imgStr = a.renderPlaceholders(width, imgHeight)
-	} else {
+	case StyleBraille:
 		imgStr = a.renderBraille(width, imgHeight)
+	default:
+		imgStr = a.renderBlocks(width, imgHeight)
 	}
 
 	// Album info text
@@ -243,7 +248,7 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 		}
 		tx, err := kittyTransmit(id, a.img)
 		if err != nil {
-			return a.renderBraille(width, height)
+			return a.renderBlocks(width, height)
 		}
 		a.oob.WriteString(tx)
 		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
@@ -370,14 +375,15 @@ func (a *Artwork) renderBraille(width, height int) string {
 		var line strings.Builder
 		line.WriteString(padStr)
 		for cx := 0; cx < cellsW; cx++ {
-			// Cluster the cell's 8 subpixels around their mean luminance.
-			// The brightest subpixel always meets the >=-mean threshold, so
-			// the bright cluster is never empty.
+			// Cell stats first: mean/min/max luminance and the overall average
+			// color, so the flat-cell path never touches cluster division.
 			var mean float64
 			var minL, maxL float64 = 256, -1
+			var allSum [3]uint64
 			for dy := 0; dy < 4; dy++ {
 				for dx := 0; dx < 2; dx++ {
-					l := lum(px[cy*4+dy][cx*2+dx])
+					c := px[cy*4+dy][cx*2+dx]
+					l := lum(c)
 					mean += l
 					if l < minL {
 						minL = l
@@ -385,9 +391,20 @@ func (a *Artwork) renderBraille(width, height int) string {
 					if l > maxL {
 						maxL = l
 					}
+					allSum[0] += uint64(c.R)
+					allSum[1] += uint64(c.G)
+					allSum[2] += uint64(c.B)
 				}
 			}
 			mean /= 8
+			avg := rgbColor{uint8(allSum[0] / 8), uint8(allSum[1] / 8), uint8(allSum[2] / 8)}
+
+			// Near-uniform cell: a solid block in the average color reads
+			// cleaner than dots — and skips clustering entirely.
+			if maxL-minL < 10 {
+				line.WriteString(styleFor(avg, avg).Render("█"))
+				continue
+			}
 
 			var mask int
 			var fgSum, bgSum [3]uint64
@@ -409,19 +426,151 @@ func (a *Artwork) renderBraille(width, height int) string {
 					}
 				}
 			}
-
-			fg := rgbColor{uint8(fgSum[0] / fgN), uint8(fgSum[1] / fgN), uint8(fgSum[2] / fgN)}
-			bg := fg
-			if bgN > 0 {
-				bg = rgbColor{uint8(bgSum[0] / bgN), uint8(bgSum[1] / bgN), uint8(bgSum[2] / bgN)}
-			}
-
-			// Near-uniform cell: solid block reads cleaner than dots.
-			if maxL-minL < 10 {
-				line.WriteString(styleFor(fg, fg).Render("█"))
+			// Floating-point guard: with near-equal values the mean can land
+			// a hair above every sample (1 ULP), leaving a cluster empty —
+			// this was an integer divide-by-zero panic on resize. Render the
+			// cell solid instead.
+			if fgN == 0 || bgN == 0 {
+				line.WriteString(styleFor(avg, avg).Render("█"))
 				continue
 			}
+
+			fg := rgbColor{uint8(fgSum[0] / fgN), uint8(fgSum[1] / fgN), uint8(fgSum[2] / fgN)}
+			bg := rgbColor{uint8(bgSum[0] / bgN), uint8(bgSum[1] / bgN), uint8(bgSum[2] / bgN)}
 			line.WriteString(styleFor(fg, bg).Render(string(rune(0x2800 + mask))))
+		}
+		rows = append(rows, line.String())
+	}
+	return strings.Join(rows, "\n")
+}
+
+// quadrantChars maps a 4-bit subpixel mask (TL=8, TR=4, BL=2, BR=1) to the
+// block element whose painted quadrants match the set bits.
+var quadrantChars = [16]string{
+	" ", "▗", "▖", "▄", "▝", "▐", "▞", "▟",
+	"▘", "▚", "▌", "▙", "▀", "▜", "▛", "█",
+}
+
+// renderBlocks draws the artwork with quadrant block elements, choosing each
+// cell's glyph by error minimization (chafa-style): every fg/bg partition of
+// the cell's 2×2 subpixels is scored by squared color error against the two
+// cluster averages, and the best-fitting partition wins. Flat cells render
+// as a solid block. This is the default fallback for terminals without
+// kitty-graphics support: photographs read smoother than dot-based braille.
+func (a *Artwork) renderBlocks(width, height int) string {
+	bounds := a.img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW == 0 || srcH == 0 {
+		return ""
+	}
+
+	// Cells are 1×2 units; quadrant subpixels are 0.5×1 units (1:2 regions
+	// of the source, which the box filter absorbs).
+	charW := width - 2
+	charH := height
+	scale := float64(srcW) / float64(charW)
+	if s := float64(srcH) / float64(charH*2); s > scale {
+		scale = s
+	}
+	cellsW := int(float64(srcW) / scale)
+	cellsH := int(float64(srcH) / scale / 2)
+	if cellsW < 1 {
+		cellsW = 1
+	}
+	if cellsH < 1 {
+		cellsH = 1
+	}
+
+	px := boxScale(a.img, cellsW*2, cellsH*2)
+
+	leftPad := (width - cellsW) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	topPad := (height - cellsH) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+	padStr := strings.Repeat(" ", leftPad)
+
+	styles := make(map[uint64]lipgloss.Style)
+	styleFor := func(fg, bg rgbColor) lipgloss.Style {
+		key := uint64(fg.R)<<40 | uint64(fg.G)<<32 | uint64(fg.B)<<24 |
+			uint64(bg.R)<<16 | uint64(bg.G)<<8 | uint64(bg.B)
+		st, ok := styles[key]
+		if !ok {
+			st = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", fg.R, fg.G, fg.B))).
+				Background(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", bg.R, bg.G, bg.B)))
+			styles[key] = st
+		}
+		return st
+	}
+
+	dist2 := func(a, b rgbColor) float64 {
+		dr := float64(a.R) - float64(b.R)
+		dg := float64(a.G) - float64(b.G)
+		db := float64(a.B) - float64(b.B)
+		return dr*dr + dg*dg + db*db
+	}
+
+	var rows []string
+	for i := 0; i < topPad; i++ {
+		rows = append(rows, "")
+	}
+	for cy := 0; cy < cellsH; cy++ {
+		var line strings.Builder
+		line.WriteString(padStr)
+		for cx := 0; cx < cellsW; cx++ {
+			// Subpixels in mask-bit order: TL(8), TR(4), BL(2), BR(1).
+			quad := [4]rgbColor{
+				px[cy*2][cx*2], px[cy*2][cx*2+1],
+				px[cy*2+1][cx*2], px[cy*2+1][cx*2+1],
+			}
+
+			bestMask, bestErr := 15, -1.0
+			var bestFg, bestBg rgbColor
+			// Masks 8..15 cover every partition once (lower masks are the
+			// same split with fg/bg swapped, i.e. the complementary glyph).
+			// Iterate from 15 down so error ties — flat cells tie at zero
+			// across all partitions — resolve to the solid block.
+			for mask := 15; mask >= 8; mask-- {
+				var fgSum, bgSum [3]float64
+				var fgN, bgN float64
+				for i, c := range quad {
+					if mask&(8>>i) != 0 {
+						fgSum[0] += float64(c.R)
+						fgSum[1] += float64(c.G)
+						fgSum[2] += float64(c.B)
+						fgN++
+					} else {
+						bgSum[0] += float64(c.R)
+						bgSum[1] += float64(c.G)
+						bgSum[2] += float64(c.B)
+						bgN++
+					}
+				}
+				fg := rgbColor{uint8(fgSum[0] / fgN), uint8(fgSum[1] / fgN), uint8(fgSum[2] / fgN)}
+				bg := fg
+				if bgN > 0 {
+					bg = rgbColor{uint8(bgSum[0] / bgN), uint8(bgSum[1] / bgN), uint8(bgSum[2] / bgN)}
+				}
+				var err float64
+				for i, c := range quad {
+					if mask&(8>>i) != 0 {
+						err += dist2(c, fg)
+					} else {
+						err += dist2(c, bg)
+					}
+				}
+				if bestErr < 0 || err < bestErr {
+					bestErr = err
+					bestMask = mask
+					bestFg, bestBg = fg, bg
+				}
+			}
+			line.WriteString(styleFor(bestFg, bestBg).Render(quadrantChars[bestMask]))
 		}
 		rows = append(rows, line.String())
 	}

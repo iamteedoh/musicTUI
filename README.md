@@ -410,9 +410,15 @@ The right panel shows the current track's album cover. How sharp it looks depend
 
   ![Full-resolution album artwork in Ghostty](docs/artwork_ghostty.png)
 
-- **High-detail character art** — everywhere else (iTerm2, Warp, Konsole, Terminal.app, tmux, and any other terminal): the cover is drawn with colored braille-over-background cells, the sharpest technique that works with plain text.
+- **Character art** — everywhere else (iTerm2, Warp, Konsole, Terminal.app, tmux, and any other terminal): the cover is drawn with colored block elements, each cell chosen by error minimization for the closest possible match. Character art is inherently limited by the terminal's cell grid — for the pixel-perfect version, use kitty or Ghostty.
 
-To override auto-detection, set `MUSICTUI_ARTWORK=kitty` (force pixel mode) or `MUSICTUI_ARTWORK=blocks` (force character art) when launching.
+Override auto-detection with `MUSICTUI_ARTWORK` when launching:
+
+| Value | Renderer |
+| --- | --- |
+| `kitty` | Force pixel graphics (if your terminal supports kitty Unicode placeholders) |
+| `blocks` | Force block-element character art (the default fallback) |
+| `braille` | Braille-over-background character art — finer dots, more texture; some prefer it |
 
 ---
 

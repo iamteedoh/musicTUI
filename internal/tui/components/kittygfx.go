@@ -43,30 +43,47 @@ var rowColDiacritics = []rune{
 // maxKittyGridDim is the largest placeholder grid we can address per axis.
 func maxKittyGridDim() int { return len(rowColDiacritics) }
 
-// KittyGraphicsSupported reports whether the terminal is known to render
-// Unicode-placeholder graphics. MUSICTUI_ARTWORK overrides detection:
-// "blocks" forces the character-art fallback, "kitty" forces hi-res on.
-func KittyGraphicsSupported() bool {
+// ArtworkStyle selects how the artwork panel renders the cover.
+type ArtworkStyle int
+
+const (
+	// StyleBlocks: quadrant block elements chosen by error minimization.
+	// The universal default — photographs read smoothest.
+	StyleBlocks ArtworkStyle = iota
+	// StyleBraille: colored braille over painted backgrounds — higher
+	// spatial detail, visible dot texture. Opt-in for those who prefer it.
+	StyleBraille
+	// StyleKitty: the actual image via kitty-graphics Unicode placeholders.
+	StyleKitty
+)
+
+// DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
+// detection: "kitty" forces pixel graphics, "blocks" and "braille" force the
+// respective character-art styles. Otherwise kitty graphics are enabled on
+// terminals known to render Unicode placeholders (kitty, Ghostty).
+func DetectArtworkStyle() ArtworkStyle {
 	switch strings.ToLower(os.Getenv("MUSICTUI_ARTWORK")) {
 	case "blocks":
-		return false
+		return StyleBlocks
+	case "braille":
+		return StyleBraille
 	case "kitty", "hires":
-		return true
+		return StyleKitty
 	}
 	// Inside tmux the APC escapes would need passthrough wrapping; use blocks.
 	if os.Getenv("TMUX") != "" {
-		return false
+		return StyleBlocks
 	}
 	term := os.Getenv("TERM")
 	prog := os.Getenv("TERM_PROGRAM")
 	if strings.Contains(term, "kitty") || os.Getenv("KITTY_WINDOW_ID") != "" {
-		return true
+		return StyleKitty
 	}
 	if strings.Contains(term, "ghostty") || strings.EqualFold(prog, "ghostty") ||
 		os.Getenv("GHOSTTY_RESOURCES_DIR") != "" {
-		return true
+		return StyleKitty
 	}
-	return false
+	return StyleBlocks
 }
 
 // kittyTransmit encodes img as PNG and returns the chunked APC escape

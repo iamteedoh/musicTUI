@@ -133,10 +133,11 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		bridgePath:  bridgePath,
 	}
 	// Pixel-perfect album art where the terminal supports kitty-graphics
-	// Unicode placeholders (kitty, Ghostty); quadrant blocks elsewhere.
+	// Unicode placeholders (kitty, Ghostty); error-minimized block art
+	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides).
 	art := components.NewArtwork()
 	app.artwork = &art
-	app.artwork.SetHiRes(components.KittyGraphicsSupported())
+	app.artwork.SetStyle(components.DetectArtworkStyle())
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
 	} else {
