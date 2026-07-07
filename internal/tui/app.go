@@ -40,6 +40,7 @@ type App struct {
 	view                 model.View
 	showLyrics           bool // toggle inline lyrics in center panel (default: true)
 	sidebarPlaylistFocus bool // true when sidebar focus is on the playlist section
+	cleanupPromptShown   bool // true once the duplicate/empty cleanup prompt has been offered this session
 	modal                components.Modal
 	onboard              components.Onboard
 	help                 components.Help
@@ -620,6 +621,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.library.AppendTracks(msg.Tracks, msg.Total, msg.Offset)
 		return a, nil
 	case PlaylistsLoadedMsg:
+		// A fresh fetch always starts at offset 0. Reset the list on the first
+		// page so a re-fetch (e.g. the playlist reload after a stale-token
+		// re-auth, which happens when a track finishes and the next one comes
+		// back Unavailable) REPLACES the list instead of appending a second
+		// copy of every playlist. The old append-only behavior doubled the
+		// in-memory list, which then tripped the "duplicate playlists" prompt
+		// mid-playback and looked like the playlists had been duplicated
+		// (MUS-13). Later pages (offset > 0) still append, for pagination.
+		if msg.Offset == 0 {
+			a.playlist.Items = nil
+		}
 		a.playlist.Items = append(a.playlist.Items, msg.Playlists...)
 		a.playlist.Total = msg.Total
 		// Auto-paginate: fetch next page if more playlists exist
@@ -639,7 +651,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and unfollowing a playlist you own removes it from /me/playlists
 		// with no public API to list it back. Explicit warning in the
 		// prompt copy.
-		if a.config.CheckDuplicates {
+		// Only offer the cleanup prompts once per session, on the first full
+		// load — never on the background re-fetches that follow a re-auth.
+		// Popping a confirmation modal in the middle of playback (which is
+		// what happened in MUS-13) is jarring and unexpected.
+		if a.config.CheckDuplicates && !a.cleanupPromptShown {
+			a.cleanupPromptShown = true
 			if groups := a.findDuplicatePlaylists(); len(groups) > 0 {
 				var names []string
 				for _, g := range groups {
