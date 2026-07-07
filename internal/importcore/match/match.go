@@ -120,11 +120,22 @@ func scoreTrack(src Track, cand Candidate) float64 {
 	artistSim := artistOverlap(src.Artists, candArtistNames(cand))
 
 	// Weighted blend. Title carries more weight because artist matches
-	// are easy to game (many songs share one-name artists like "Drake"),
-	// but a high title match with zero artist overlap is still a red
-	// flag — so we don't let artistSim==0 drop confidence below the
-	// threshold on its own without a perfect title.
+	// are easy to game (many songs share one-name artists like "Drake").
 	score := 0.7*titleSim + 0.3*artistSim
+
+	// Wrong-artist gate: when BOTH sides carry artist info and there is
+	// zero overlap, the candidate is almost certainly a cover, karaoke,
+	// or tribute version of the same title — exactly the silent
+	// corruption an import must not commit. Cap the score below the
+	// accept threshold so the track is reported as unmatched (loud and
+	// user-fixable) instead. An exact title alone used to score 0.7 and
+	// auto-accept, which put cover versions into imported playlists.
+	if artistSim == 0 && len(src.Artists) > 0 && len(cand.Artists) > 0 {
+		if capped := MatchThreshold - 0.05; score > capped {
+			score = capped
+		}
+		return score
+	}
 
 	// Bonus: exact normalized title match + any artist overlap → push
 	// toward 1.0 so high-confidence matches reliably clear threshold.
@@ -146,17 +157,51 @@ func artistOverlap(a, b []string) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
-	bset := make(map[string]struct{}, len(b))
+	bnorm := make([]string, 0, len(b))
 	for _, n := range b {
-		bset[normalizeArtist(n)] = struct{}{}
+		if bn := normalizeArtist(n); bn != "" {
+			bnorm = append(bnorm, bn)
+		}
 	}
 	var hit int
 	for _, n := range a {
-		if _, ok := bset[normalizeArtist(n)]; ok {
-			hit++
+		an := normalizeArtist(n)
+		if an == "" {
+			continue
+		}
+		for _, bn := range bnorm {
+			// Equal, equal-ignoring-spaces ("AC/DC" vs "ACDC"), or one
+			// contains the other as a whole word ("Karol G, Shakira").
+			if an == bn || squash(an) == squash(bn) ||
+				artistContains(an, bn) || artistContains(bn, an) {
+				hit++
+				break
+			}
 		}
 	}
 	return float64(hit) / float64(len(a))
+}
+
+// squash removes spaces for punctuation-insensitive comparison.
+func squash(s string) string {
+	return strings.ReplaceAll(s, " ", "")
+}
+
+// artistContains reports whether outer contains inner as a whole word —
+// "karol g shakira" contains "karol g", but "meatloaf" does not contain
+// "eat". Guards against trivially short inners.
+func artistContains(outer, inner string) bool {
+	if len(inner) < 3 || len(inner) >= len(outer) {
+		return false
+	}
+	idx := strings.Index(outer, inner)
+	if idx < 0 {
+		return false
+	}
+	beforeOK := idx == 0 || outer[idx-1] == ' '
+	end := idx + len(inner)
+	afterOK := end == len(outer) || outer[end] == ' '
+	return beforeOK && afterOK
 }
 
 // ─────────────────── normalization ───────────────────
@@ -174,8 +219,36 @@ var (
 	whitespaceRun = regexp.MustCompile(`\s+`)
 )
 
+// accentFolder transliterates common Latin diacritics and ligatures to
+// their ASCII base letters so "Bahía"/"Bahia" and "Beyoncé"/"Beyonce"
+// normalize identically. The previous behavior DELETED non-ASCII runes
+// (Go regexp's \w is ASCII-only), so the accented and unaccented forms of
+// the same name never matched — international artists scored 0 overlap.
+var accentFolder = strings.NewReplacer(
+	"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a", "å", "a", "ā", "a", "ă", "a", "ą", "a",
+	"é", "e", "è", "e", "ê", "e", "ë", "e", "ē", "e", "ė", "e", "ę", "e", "ě", "e",
+	"í", "i", "ì", "i", "î", "i", "ï", "i", "ī", "i", "į", "i", "ı", "i",
+	"ó", "o", "ò", "o", "ô", "o", "ö", "o", "õ", "o", "ø", "o", "ō", "o", "ő", "o",
+	"ú", "u", "ù", "u", "û", "u", "ü", "u", "ū", "u", "ů", "u", "ű", "u", "ų", "u",
+	"ý", "y", "ÿ", "y",
+	"ñ", "n", "ń", "n", "ň", "n",
+	"ç", "c", "ć", "c", "č", "c",
+	"š", "s", "ś", "s", "ş", "s", "ș", "s",
+	"ž", "z", "ź", "z", "ż", "z",
+	"ł", "l", "ľ", "l",
+	"ď", "d", "đ", "d",
+	"ť", "t", "ţ", "t", "ț", "t",
+	"ř", "r",
+	"ğ", "g",
+	"ß", "ss", "æ", "ae", "œ", "oe", "ð", "d", "þ", "th",
+)
+
+func foldAccents(s string) string {
+	return accentFolder.Replace(s)
+}
+
 func normalizeTitle(s string) string {
-	s = strings.ToLower(s)
+	s = foldAccents(strings.ToLower(s))
 	// Strip "(feat. ...)" variations regardless of position — always noise.
 	s = featParen.ReplaceAllString(s, " ")
 	s = featBrackets.ReplaceAllString(s, " ")
@@ -191,13 +264,15 @@ func normalizeTitle(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// normalizeArtist is simpler — artist names are less cluttered.
-// Lowercase + strip non-alphanumerics so "Beyoncé" and "beyonce"
-// collapse identically (Go's `\w` is ASCII-only by default, so é
-// drops to nothing and both become "beyonc").
+// normalizeArtist lowercases, folds accents to ASCII (so "Beyoncé" and
+// "beyonce" really do collapse identically), strips a leading "the "
+// ("The Beatles" vs "Beatles"), and removes remaining punctuation while
+// preserving word boundaries for whole-word containment checks.
 func normalizeArtist(s string) string {
-	s = strings.ToLower(s)
-	s = punctRun.ReplaceAllString(s, "")
+	s = foldAccents(strings.ToLower(s))
+	s = strings.TrimPrefix(s, "the ")
+	s = punctRun.ReplaceAllString(s, " ")
+	s = whitespaceRun.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
 }
 

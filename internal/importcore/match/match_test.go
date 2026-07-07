@@ -149,3 +149,80 @@ func TestBuildQuery(t *testing.T) {
 		}
 	}
 }
+
+// The reported MUS-18 bug: an exact-title candidate by a COMPLETELY
+// different artist (cover / karaoke / tribute version) must be rejected,
+// not silently imported. It used to score 0.7 (title alone) and pass the
+// 0.60 threshold.
+func TestPickRejectsWrongArtistCover(t *testing.T) {
+	src := Track{Title: "Blinding Lights", Artists: []string{"The Weeknd"}}
+	cover := Candidate{
+		URI:     "spotify:track:cover",
+		Name:    "Blinding Lights",
+		Artists: []Artist{{Name: "Karaoke Hits Band"}},
+	}
+	res := Pick(src, []Candidate{cover})
+	if res.Candidate != nil {
+		t.Fatalf("wrong-artist cover was accepted (confidence %v) — this corrupts imports", res.Confidence)
+	}
+}
+
+// With both the original and a cover in the candidate set, the original
+// must win even if the cover is listed first.
+func TestPickPrefersOriginalOverCover(t *testing.T) {
+	src := Track{Title: "Blinding Lights", Artists: []string{"The Weeknd"}}
+	cands := []Candidate{
+		{URI: "spotify:track:cover", Name: "Blinding Lights", Artists: []Artist{{Name: "Tribute Stars"}}},
+		{URI: "spotify:track:orig", Name: "Blinding Lights", Artists: []Artist{{Name: "The Weeknd"}}},
+	}
+	res := Pick(src, cands)
+	if res.Candidate == nil || res.Candidate.URI != "spotify:track:orig" {
+		t.Fatalf("expected the original to win, got %+v", res.Candidate)
+	}
+}
+
+// Accented and unaccented forms of the same artist must match: the old
+// normalization DELETED non-ASCII runes, so "Bahía" ("baha") never matched
+// "Bahia" ("bahia") and international artists scored zero overlap.
+func TestArtistOverlapFoldsAccents(t *testing.T) {
+	cases := []struct{ a, b string }{
+		{"Mike Bahía", "Mike Bahia"},
+		{"Beyoncé", "Beyonce"},
+		{"Céline Dion", "Celine Dion"},
+		{"Motörhead", "Motorhead"},
+	}
+	for _, c := range cases {
+		if got := artistOverlap([]string{c.a}, []string{c.b}); got != 1.0 {
+			t.Errorf("artistOverlap(%q, %q) = %v, want 1.0", c.a, c.b, got)
+		}
+	}
+}
+
+// Leniency: "The X" vs "X", joined artist strings, and punctuation forms.
+func TestArtistOverlapLeniency(t *testing.T) {
+	cases := []struct{ a, b string }{
+		{"The Beatles", "Beatles"},
+		{"KAROL G", "KAROL G, Shakira"},
+		{"AC/DC", "ACDC"},
+	}
+	for _, c := range cases {
+		if got := artistOverlap([]string{c.a}, []string{c.b}); got != 1.0 {
+			t.Errorf("artistOverlap(%q, %q) = %v, want 1.0", c.a, c.b, got)
+		}
+	}
+	// Whole-word containment must not false-positive on substrings.
+	if got := artistOverlap([]string{"Eat"}, []string{"Meatloaf"}); got != 0 {
+		t.Errorf("artistOverlap(Eat, Meatloaf) = %v, want 0", got)
+	}
+}
+
+// A source with NO artist info can still match on title alone — the
+// wrong-artist gate only applies when both sides carry artists.
+func TestPickTitleOnlyWhenSourceHasNoArtist(t *testing.T) {
+	src := Track{Title: "Bohemian Rhapsody"}
+	cand := Candidate{URI: "spotify:track:x", Name: "Bohemian Rhapsody", Artists: []Artist{{Name: "Queen"}}}
+	res := Pick(src, []Candidate{cand})
+	if res.Candidate == nil {
+		t.Fatalf("artist-less source failed to match on exact title (confidence %v)", res.Confidence)
+	}
+}
