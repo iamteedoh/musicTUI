@@ -58,25 +58,26 @@ func TestArtworkRendersSolidCells(t *testing.T) {
 	}
 }
 
-// A cell whose left half is bright and right half is dark must pick the
-// left-half glyph (▌): TL+BL form the bright cluster (mask 8|2 = 10).
-func TestQuadrantGlyphSelection(t *testing.T) {
+// A cell whose left column is bright and right column dark must pick the
+// left-column braille glyph ⡇ (dots 1,2,3,7 → mask 0x47) with the bright
+// cluster as foreground.
+func TestBrailleGlyphSelection(t *testing.T) {
 	th := theme.FromName("")
-	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
-	img.Set(0, 0, color.RGBA{255, 255, 255, 255})
-	img.Set(0, 1, color.RGBA{255, 255, 255, 255})
-	img.Set(1, 0, color.RGBA{0, 0, 0, 255})
-	img.Set(1, 1, color.RGBA{0, 0, 0, 255})
+	img := image.NewRGBA(image.Rect(0, 0, 2, 4))
+	for y := 0; y < 4; y++ {
+		img.Set(0, y, color.RGBA{255, 255, 255, 255})
+		img.Set(1, y, color.RGBA{0, 0, 0, 255})
+	}
 
 	var a Artwork
 	a.LoadURL("u")
 	a.SetFullImage(img, "u")
 	a.SetAlbumInfo("A", "B")
 
-	// A panel that maps the whole image into one cell (2×2 subpixels).
+	// A panel that maps the whole image into one cell (2×4 subpixels).
 	out := a.View(th, 3, 4)
-	if !strings.Contains(stripAnsi(out), "▌") {
-		t.Fatalf("left-bright/right-dark cell did not render ▌:\n%q", stripAnsi(out))
+	if !strings.Contains(stripAnsi(out), "⡇") {
+		t.Fatalf("left-bright/right-dark cell did not render ⡇:\n%q", stripAnsi(out))
 	}
 }
 

@@ -171,7 +171,7 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	if a.hiRes {
 		imgStr = a.renderPlaceholders(width, imgHeight)
 	} else {
-		imgStr = a.renderQuadrants(width, imgHeight)
+		imgStr = a.renderBraille(width, imgHeight)
 	}
 
 	// Album info text
@@ -243,7 +243,7 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 		}
 		tx, err := kittyTransmit(id, a.img)
 		if err != nil {
-			return a.renderQuadrants(width, height)
+			return a.renderBraille(width, height)
 		}
 		a.oob.WriteString(tx)
 		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
@@ -275,23 +275,17 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 	return strings.Join(rows, "\n")
 }
 
-// quadrantChars maps a 4-bit "bright subpixel" mask (TL=8, TR=4, BL=2, BR=1)
-// to the block element whose painted quadrants match the bright cluster.
-var quadrantChars = [16]string{
-	" ", "▗", "▖", "▄", "▝", "▐", "▞", "▟",
-	"▘", "▚", "▌", "▙", "▀", "▜", "▛", "█",
-}
-
-// renderQuadrants draws the artwork with quadrant block elements
-// (▘▝▖▗▀▄▌▐▞▚…█): each character cell carries a 2×2 grid of image pixels.
-// The four subpixels are split into a bright and a dark cluster by
-// luminance; the glyph paints the bright cluster in the foreground color
-// and the terminal background color fills the dark cluster. This keeps the
-// spatial detail the old braille dot-matrix had (multiple subpixels per
-// cell) while painting every cell solidly in two true colors — no dither
-// noise, no gaps (chafa-style "symbols" rendering). Downscaling box-filters
-// the source to avoid sampling noise.
-func (a *Artwork) renderQuadrants(width, height int) string {
+// renderBraille draws the artwork as colored braille over a painted
+// background: each character cell carries a 2×4 grid of image pixels (the
+// same spatial detail as the original dot-matrix renderer). The eight
+// subpixels are split into bright/dark clusters by luminance; the braille
+// glyph paints the bright cluster in the foreground color while the
+// BACKGROUND color carries the dark cluster — so, unlike the original
+// braille renderer, dark regions are solid color rather than holes, and
+// each cell shows two true colors instead of one. Near-uniform cells render
+// as a full block (█) to avoid dot texture in flat areas. Downscaling
+// box-filters the source to avoid sampling noise.
+func (a *Artwork) renderBraille(width, height int) string {
 	bounds := a.img.Bounds()
 	srcW := bounds.Dx()
 	srcH := bounds.Dy()
@@ -299,10 +293,9 @@ func (a *Artwork) renderQuadrants(width, height int) string {
 		return ""
 	}
 
-	// Terminal cells are ~1:2 (w:h). Working in "units" where a cell is
-	// 1 wide × 2 tall, fit the image into the panel box, then split every
-	// cell into 2×2 subpixels (each 0.5 wide × 1 tall — a 1:2 region of
-	// the source, which boxScale handles).
+	// Terminal cells are ~1:2 (w:h). In "units" where a cell is 1 wide ×
+	// 2 tall, braille subpixels (2×4 per cell) are 0.5 × 0.5 units — square,
+	// so the cover keeps its aspect ratio.
 	charW := width - 2
 	charH := height
 	unitW := float64(charW)
@@ -321,8 +314,8 @@ func (a *Artwork) renderQuadrants(width, height int) string {
 		cellsH = 1
 	}
 
-	// 2×2 subpixels per cell.
-	px := boxScale(a.img, cellsW*2, cellsH*2)
+	// 2×4 subpixels per cell.
+	px := boxScale(a.img, cellsW*2, cellsH*4)
 
 	leftPad := (width - cellsW) / 2
 	if leftPad < 0 {
@@ -353,6 +346,22 @@ func (a *Artwork) renderQuadrants(width, height int) string {
 		return 0.299*float64(c.R) + 0.587*float64(c.G) + 0.114*float64(c.B)
 	}
 
+	// Braille dot bit layout: dots 1-3 = left column rows 0-2 (bits 0-2),
+	// dots 4-6 = right column rows 0-2 (bits 3-5), dot 7 = left row 3
+	// (bit 6), dot 8 = right row 3 (bit 7).
+	brailleBit := func(dx, dy int) int {
+		switch {
+		case dx == 0 && dy < 3:
+			return dy
+		case dx == 1 && dy < 3:
+			return dy + 3
+		case dx == 0:
+			return 6
+		default:
+			return 7
+		}
+	}
+
 	var rows []string
 	for i := 0; i < topPad; i++ {
 		rows = append(rows, "")
@@ -361,45 +370,58 @@ func (a *Artwork) renderQuadrants(width, height int) string {
 		var line strings.Builder
 		line.WriteString(padStr)
 		for cx := 0; cx < cellsW; cx++ {
-			// The cell's 2×2 subpixels, in TL, TR, BL, BR order.
-			quad := [4]rgbColor{
-				px[cy*2][cx*2], px[cy*2][cx*2+1],
-				px[cy*2+1][cx*2], px[cy*2+1][cx*2+1],
-			}
-
-			// Split into bright/dark clusters around the mean luminance.
-			// The brightest subpixel always meets a >=-mean threshold, so
-			// the mask is never 0 — every cell paints at least one quadrant.
+			// Cluster the cell's 8 subpixels around their mean luminance.
+			// The brightest subpixel always meets the >=-mean threshold, so
+			// the bright cluster is never empty.
 			var mean float64
-			for _, c := range quad {
-				mean += lum(c)
+			var minL, maxL float64 = 256, -1
+			for dy := 0; dy < 4; dy++ {
+				for dx := 0; dx < 2; dx++ {
+					l := lum(px[cy*4+dy][cx*2+dx])
+					mean += l
+					if l < minL {
+						minL = l
+					}
+					if l > maxL {
+						maxL = l
+					}
+				}
 			}
-			mean /= 4
+			mean /= 8
 
 			var mask int
 			var fgSum, bgSum [3]uint64
 			var fgN, bgN uint64
-			for i, c := range quad {
-				if lum(c) >= mean {
-					mask |= 8 >> i
-					fgSum[0] += uint64(c.R)
-					fgSum[1] += uint64(c.G)
-					fgSum[2] += uint64(c.B)
-					fgN++
-				} else {
-					bgSum[0] += uint64(c.R)
-					bgSum[1] += uint64(c.G)
-					bgSum[2] += uint64(c.B)
-					bgN++
+			for dy := 0; dy < 4; dy++ {
+				for dx := 0; dx < 2; dx++ {
+					c := px[cy*4+dy][cx*2+dx]
+					if lum(c) >= mean {
+						mask |= 1 << brailleBit(dx, dy)
+						fgSum[0] += uint64(c.R)
+						fgSum[1] += uint64(c.G)
+						fgSum[2] += uint64(c.B)
+						fgN++
+					} else {
+						bgSum[0] += uint64(c.R)
+						bgSum[1] += uint64(c.G)
+						bgSum[2] += uint64(c.B)
+						bgN++
+					}
 				}
 			}
 
 			fg := rgbColor{uint8(fgSum[0] / fgN), uint8(fgSum[1] / fgN), uint8(fgSum[2] / fgN)}
-			bg := fg // uniform cell (mask 15): bg unused by █ but keep it defined
+			bg := fg
 			if bgN > 0 {
 				bg = rgbColor{uint8(bgSum[0] / bgN), uint8(bgSum[1] / bgN), uint8(bgSum[2] / bgN)}
 			}
-			line.WriteString(styleFor(fg, bg).Render(quadrantChars[mask]))
+
+			// Near-uniform cell: solid block reads cleaner than dots.
+			if maxL-minL < 10 {
+				line.WriteString(styleFor(fg, fg).Render("█"))
+				continue
+			}
+			line.WriteString(styleFor(fg, bg).Render(string(rune(0x2800 + mask))))
 		}
 		rows = append(rows, line.String())
 	}
