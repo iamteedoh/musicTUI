@@ -17,9 +17,9 @@ import (
 // same way. The look comes from three CAVA mechanisms — NOT spatial spreading
 // (monstercat/waves are off in Kurve) — applied to the FFT magnitudes:
 //
-//   1. log-distributed frequency bars between a low and high cutoff,
-//   2. a gravity falloff filter (snap up; fall with acceleration), and
-//   3. a leaky-integral time filter,
+//  1. log-distributed frequency bars between a low and high cutoff,
+//  2. a gravity falloff filter (snap up; fall with acceleration), and
+//  3. a leaky-integral time filter,
 //
 // both driven by `noise_reduction`, plus auto-sensitivity that keeps the
 // loudest bars near full height. Constants/formulas are ported from
@@ -49,9 +49,9 @@ const (
 	// mid peaks grow) without raising the floor. Override with MUSICTUI_VIZ_GAIN.
 	vizPeakGainDefault = 2.0
 
-	vizSat        = 0.85 // rainbow saturation
-	vizLightBase  = 0.30 // glow brightness at the base of a bar
-	vizLightRange = 0.32 // extra brightness toward the top
+	vizSat        = 0.85  // rainbow saturation
+	vizLightBase  = 0.30  // glow brightness at the base of a bar
+	vizLightRange = 0.32  // extra brightness toward the top
 	vizHueSpan    = 300.0 // hue sweep across the width (red→…→magenta)
 )
 

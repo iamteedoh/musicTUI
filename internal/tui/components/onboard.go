@@ -11,11 +11,11 @@ import (
 // setup without requiring the user to leave the TUI to read docs. It is its
 // own full-screen view while Active is true.
 type Onboard struct {
-	Active         bool
-	Step           int
-	ClientIDInput  string
-	CursorPos      int
-	Error          string
+	Active        bool
+	Step          int
+	ClientIDInput string
+	CursorPos     int
+	Error         string
 }
 
 // TotalSteps is the number of steps in the wizard (including the final

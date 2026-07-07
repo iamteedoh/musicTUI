@@ -18,7 +18,8 @@ type Hint struct {
 // separators. Shared so every view's hint row stays visually consistent.
 //
 // Example output (with styling):
-//   j/k: move  ·  Enter: play  ·  a: add to playlist
+//
+//	j/k: move  ·  Enter: play  ·  a: add to playlist
 func RenderHints(th theme.Theme, hints []Hint) string {
 	if len(hints) == 0 {
 		return ""

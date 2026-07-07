@@ -59,15 +59,15 @@ type rawPlaylistItem struct {
 }
 
 type rawTrack struct {
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	URI         string           `json:"uri"`
-	DurationMs  int             `json:"duration_ms"`
-	TrackNumber int             `json:"track_number"`
-	DiscNumber  int             `json:"disc_number"`
-	Explicit    bool            `json:"explicit"`
-	Artists     []rawArtistRef  `json:"artists"`
-	Album       *rawAlbumRef    `json:"album"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	URI         string         `json:"uri"`
+	DurationMs  int            `json:"duration_ms"`
+	TrackNumber int            `json:"track_number"`
+	DiscNumber  int            `json:"disc_number"`
+	Explicit    bool           `json:"explicit"`
+	Artists     []rawArtistRef `json:"artists"`
+	Album       *rawAlbumRef   `json:"album"`
 }
 
 type rawArtistRef struct {

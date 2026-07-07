@@ -8,12 +8,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/audio"
 	"github.com/iamteedoh/musicTUI/internal/importbackend"
+	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
 	"github.com/iamteedoh/musicTUI/internal/lyrics"
 	"github.com/iamteedoh/musicTUI/internal/model"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
 )
 
 // Navigation

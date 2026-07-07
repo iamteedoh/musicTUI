@@ -21,14 +21,14 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/audio"
 	"github.com/iamteedoh/musicTUI/internal/config"
 	"github.com/iamteedoh/musicTUI/internal/importbackend"
+	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
+	"github.com/iamteedoh/musicTUI/internal/importcore/oauth"
 	"github.com/iamteedoh/musicTUI/internal/model"
 	"github.com/iamteedoh/musicTUI/internal/mpris"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
-	"github.com/iamteedoh/musicTUI/internal/importcore/importer"
-	"github.com/iamteedoh/musicTUI/internal/importcore/oauth"
 )
 
 type App struct {

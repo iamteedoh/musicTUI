@@ -77,7 +77,7 @@ func (a *Artwork) SetAlbumInfo(album, artist string) {
 
 func (a *Artwork) SetImage(_ [][]rgbColor, _, _ int, _ string) {}
 func (a *Artwork) SetGray(_ [][]uint8, _, _ int, _ string)     {}
-func (a *Artwork) SetTrackInfo(_, _, _ string)                  {}
+func (a *Artwork) SetTrackInfo(_, _, _ string)                 {}
 
 func FetchArtwork(url string) ArtworkResult {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -282,12 +282,24 @@ func boostColor(r, g, b uint8) (uint8, uint8, uint8) {
 	gf *= 1.1
 	bf *= 1.1
 
-	if rf > 255 { rf = 255 }
-	if gf > 255 { gf = 255 }
-	if bf > 255 { bf = 255 }
-	if rf < 0 { rf = 0 }
-	if gf < 0 { gf = 0 }
-	if bf < 0 { bf = 0 }
+	if rf > 255 {
+		rf = 255
+	}
+	if gf > 255 {
+		gf = 255
+	}
+	if bf > 255 {
+		bf = 255
+	}
+	if rf < 0 {
+		rf = 0
+	}
+	if gf < 0 {
+		gf = 0
+	}
+	if bf < 0 {
+		bf = 0
+	}
 
 	return uint8(rf), uint8(gf), uint8(bf)
 }

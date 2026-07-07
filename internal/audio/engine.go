@@ -24,18 +24,18 @@ type bridgeCommand struct {
 
 // bridgeEvent is received from the Rust player-bridge via stderr.
 type bridgeEvent struct {
-	Event      string    `json:"event"`
-	TrackID    string    `json:"track_id,omitempty"`
-	PositionMs *int64    `json:"position_ms,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	Magnitudes []float32 `json:"magnitudes,omitempty"`
-	Bass       *float32  `json:"bass,omitempty"`
-	Mids       *float32  `json:"mids,omitempty"`
-	Highs      *float32  `json:"highs,omitempty"`
-	Energy        *float32 `json:"energy,omitempty"`
-	Beat          *bool    `json:"beat,omitempty"`
-	BeatIntensity *float32 `json:"beat_intensity,omitempty"`
-	Bpm           *float32 `json:"bpm,omitempty"`
+	Event         string    `json:"event"`
+	TrackID       string    `json:"track_id,omitempty"`
+	PositionMs    *int64    `json:"position_ms,omitempty"`
+	Message       string    `json:"message,omitempty"`
+	Magnitudes    []float32 `json:"magnitudes,omitempty"`
+	Bass          *float32  `json:"bass,omitempty"`
+	Mids          *float32  `json:"mids,omitempty"`
+	Highs         *float32  `json:"highs,omitempty"`
+	Energy        *float32  `json:"energy,omitempty"`
+	Beat          *bool     `json:"beat,omitempty"`
+	BeatIntensity *float32  `json:"beat_intensity,omitempty"`
+	Bpm           *float32  `json:"bpm,omitempty"`
 }
 
 // Event is sent from the engine to the TUI.

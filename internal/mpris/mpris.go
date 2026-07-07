@@ -20,11 +20,11 @@ const (
 )
 
 const (
-	busName       = "org.mpris.MediaPlayer2.musicTUI"
-	objectPath    = "/org/mpris/MediaPlayer2"
-	playerIface   = "org.mpris.MediaPlayer2.Player"
-	rootIface     = "org.mpris.MediaPlayer2"
-	propsIface    = "org.freedesktop.DBus.Properties"
+	busName     = "org.mpris.MediaPlayer2.musicTUI"
+	objectPath  = "/org/mpris/MediaPlayer2"
+	playerIface = "org.mpris.MediaPlayer2.Player"
+	rootIface   = "org.mpris.MediaPlayer2"
+	propsIface  = "org.freedesktop.DBus.Properties"
 )
 
 // Server registers musicTUI as an MPRIS media player on the session D-Bus.

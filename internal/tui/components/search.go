@@ -148,7 +148,11 @@ func (s *Search) TotalItems() int {
 	return len(s.Results.Tracks) + len(s.Results.Artists) + len(s.Results.Albums) + len(s.Results.Playlists)
 }
 
-func (s *Search) Up()   { if s.SelectedResult > 0 { s.SelectedResult-- } }
+func (s *Search) Up() {
+	if s.SelectedResult > 0 {
+		s.SelectedResult--
+	}
+}
 func (s *Search) Down() {
 	total := s.TotalItems()
 	if total > 0 && s.SelectedResult < total-1 {

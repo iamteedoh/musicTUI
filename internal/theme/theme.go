@@ -7,26 +7,26 @@ import (
 )
 
 type Theme struct {
-	Name           string
-	BaseBg         lipgloss.Color // Darkest background — outer frame and panel gaps
-	Bg             lipgloss.Color
-	Fg             lipgloss.Color
-	FgDim          lipgloss.Color
-	FgMuted        lipgloss.Color
-	Surface        lipgloss.Color
-	SurfaceBright  lipgloss.Color
-	Accent         lipgloss.Color
-	AccentDim      lipgloss.Color
-	Success        lipgloss.Color
-	Warning        lipgloss.Color
-	Error          lipgloss.Color
-	SidebarBg      lipgloss.Color
-	SidebarSel     lipgloss.Color
-	NowPlayingBg   lipgloss.Color
-	Border         lipgloss.Color
-	BorderFocused  lipgloss.Color
-	ProgressBar    lipgloss.Color
-	ProgressBg     lipgloss.Color
+	Name          string
+	BaseBg        lipgloss.Color // Darkest background — outer frame and panel gaps
+	Bg            lipgloss.Color
+	Fg            lipgloss.Color
+	FgDim         lipgloss.Color
+	FgMuted       lipgloss.Color
+	Surface       lipgloss.Color
+	SurfaceBright lipgloss.Color
+	Accent        lipgloss.Color
+	AccentDim     lipgloss.Color
+	Success       lipgloss.Color
+	Warning       lipgloss.Color
+	Error         lipgloss.Color
+	SidebarBg     lipgloss.Color
+	SidebarSel    lipgloss.Color
+	NowPlayingBg  lipgloss.Color
+	Border        lipgloss.Color
+	BorderFocused lipgloss.Color
+	ProgressBar   lipgloss.Color
+	ProgressBg    lipgloss.Color
 }
 
 func Nord() Theme {
