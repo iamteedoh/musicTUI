@@ -40,7 +40,8 @@ func TestBoxScaleAverages(t *testing.T) {
 
 // Every artwork cell must be painted — dark pixels included. The old braille
 // renderer emitted a bare space for dark regions, which read as holes in the
-// cover; the half-block renderer colors both halves of every cell (MUS-15).
+// cover; the quadrant renderer paints every cell (a uniform cell renders as
+// a full block in its own color) — MUS-15.
 func TestArtworkRendersSolidCells(t *testing.T) {
 	th := theme.FromName("")
 	var a Artwork
@@ -50,14 +51,32 @@ func TestArtworkRendersSolidCells(t *testing.T) {
 	a.SetAlbumInfo("Album", "Artist")
 
 	out := a.View(th, 20, 14)
-	if !strings.Contains(out, "▀") {
-		t.Fatalf("artwork render contains no half-block cells:\n%q", out)
-	}
-	// The image area must not be blank: strip ANSI and expect ▀ runs.
 	plain := stripAnsi(out)
-	blocks := strings.Count(plain, "▀")
+	blocks := strings.Count(plain, "█")
 	if blocks < 50 {
-		t.Fatalf("expected a solidly painted cover (>=50 cells), got %d", blocks)
+		t.Fatalf("expected a solidly painted cover (>=50 full-block cells), got %d:\n%q", blocks, plain)
+	}
+}
+
+// A cell whose left half is bright and right half is dark must pick the
+// left-half glyph (▌): TL+BL form the bright cluster (mask 8|2 = 10).
+func TestQuadrantGlyphSelection(t *testing.T) {
+	th := theme.FromName("")
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{255, 255, 255, 255})
+	img.Set(0, 1, color.RGBA{255, 255, 255, 255})
+	img.Set(1, 0, color.RGBA{0, 0, 0, 255})
+	img.Set(1, 1, color.RGBA{0, 0, 0, 255})
+
+	var a Artwork
+	a.LoadURL("u")
+	a.SetFullImage(img, "u")
+	a.SetAlbumInfo("A", "B")
+
+	// A panel that maps the whole image into one cell (2×2 subpixels).
+	out := a.View(th, 3, 4)
+	if !strings.Contains(stripAnsi(out), "▌") {
+		t.Fatalf("left-bright/right-dark cell did not render ▌:\n%q", stripAnsi(out))
 	}
 }
 

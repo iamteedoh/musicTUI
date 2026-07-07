@@ -134,7 +134,7 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 		imgHeight = 3
 	}
 
-	imgStr := a.renderHalfBlocks(width, imgHeight)
+	imgStr := a.renderQuadrants(width, imgHeight)
 
 	// Album info text
 	maxW := width - 2
@@ -155,14 +155,23 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	return imgStr + "\n" + info
 }
 
-// renderHalfBlocks draws the artwork as solid color using the upper-half
-// block (▀): each character cell shows TWO image pixels — foreground colors
-// the top half, background colors the bottom half. Unlike the previous
-// braille dot-matrix (sparse dots, dark areas rendered as blank space, one
-// color per 8 dots), every cell is fully painted in true color, so the art
-// reads as a continuous image. Downscaling box-filters the source (averages
-// every source pixel in the target region) to avoid sampling noise.
-func (a *Artwork) renderHalfBlocks(width, height int) string {
+// quadrantChars maps a 4-bit "bright subpixel" mask (TL=8, TR=4, BL=2, BR=1)
+// to the block element whose painted quadrants match the bright cluster.
+var quadrantChars = [16]string{
+	" ", "▗", "▖", "▄", "▝", "▐", "▞", "▟",
+	"▘", "▚", "▌", "▙", "▀", "▜", "▛", "█",
+}
+
+// renderQuadrants draws the artwork with quadrant block elements
+// (▘▝▖▗▀▄▌▐▞▚…█): each character cell carries a 2×2 grid of image pixels.
+// The four subpixels are split into a bright and a dark cluster by
+// luminance; the glyph paints the bright cluster in the foreground color
+// and the terminal background color fills the dark cluster. This keeps the
+// spatial detail the old braille dot-matrix had (multiple subpixels per
+// cell) while painting every cell solidly in two true colors — no dither
+// noise, no gaps (chafa-style "symbols" rendering). Downscaling box-filters
+// the source to avoid sampling noise.
+func (a *Artwork) renderQuadrants(width, height int) string {
 	bounds := a.img.Bounds()
 	srcW := bounds.Dx()
 	srcH := bounds.Dy()
@@ -170,37 +179,36 @@ func (a *Artwork) renderHalfBlocks(width, height int) string {
 		return ""
 	}
 
-	// Terminal cells are ~1:2 (w:h); one cell = 1 pixel wide × 2 pixels tall,
-	// which makes the sub-pixels roughly square, so a square cover stays square.
+	// Terminal cells are ~1:2 (w:h). Working in "units" where a cell is
+	// 1 wide × 2 tall, fit the image into the panel box, then split every
+	// cell into 2×2 subpixels (each 0.5 wide × 1 tall — a 1:2 region of
+	// the source, which boxScale handles).
 	charW := width - 2
 	charH := height
-	pxW := charW
-	pxH := charH * 2
+	unitW := float64(charW)
+	unitH := float64(charH * 2)
 
-	// Fit preserving aspect ratio.
-	scale := float64(srcW) / float64(pxW)
-	if s := float64(srcH) / float64(pxH); s > scale {
+	scale := float64(srcW) / unitW
+	if s := float64(srcH) / unitH; s > scale {
 		scale = s
 	}
-	actualPxW := int(float64(srcW) / scale)
-	actualPxH := int(float64(srcH) / scale)
-	if actualPxW < 1 {
-		actualPxW = 1
+	cellsW := int(float64(srcW) / scale)
+	cellsH := int(float64(srcH) / scale / 2)
+	if cellsW < 1 {
+		cellsW = 1
 	}
-	if actualPxH < 2 {
-		actualPxH = 2
+	if cellsH < 1 {
+		cellsH = 1
 	}
-	actualCharW := actualPxW
-	actualCharH := actualPxH / 2
 
-	// Box-filter the source into the target pixel grid.
-	px := boxScale(a.img, actualPxW, actualCharH*2)
+	// 2×2 subpixels per cell.
+	px := boxScale(a.img, cellsW*2, cellsH*2)
 
-	leftPad := (width - actualCharW) / 2
+	leftPad := (width - cellsW) / 2
 	if leftPad < 0 {
 		leftPad = 0
 	}
-	topPad := (height - actualCharH) / 2
+	topPad := (height - cellsH) / 2
 	if topPad < 0 {
 		topPad = 0
 	}
@@ -208,28 +216,70 @@ func (a *Artwork) renderHalfBlocks(width, height int) string {
 
 	// Styles repeat heavily across cells (flat color areas); cache them.
 	styles := make(map[uint64]lipgloss.Style)
-	styleFor := func(top, bot rgbColor) lipgloss.Style {
-		key := uint64(top.R)<<40 | uint64(top.G)<<32 | uint64(top.B)<<24 |
-			uint64(bot.R)<<16 | uint64(bot.G)<<8 | uint64(bot.B)
+	styleFor := func(fg, bg rgbColor) lipgloss.Style {
+		key := uint64(fg.R)<<40 | uint64(fg.G)<<32 | uint64(fg.B)<<24 |
+			uint64(bg.R)<<16 | uint64(bg.G)<<8 | uint64(bg.B)
 		st, ok := styles[key]
 		if !ok {
 			st = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", top.R, top.G, top.B))).
-				Background(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", bot.R, bot.G, bot.B)))
+				Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", fg.R, fg.G, fg.B))).
+				Background(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", bg.R, bg.G, bg.B)))
 			styles[key] = st
 		}
 		return st
+	}
+
+	lum := func(c rgbColor) float64 {
+		return 0.299*float64(c.R) + 0.587*float64(c.G) + 0.114*float64(c.B)
 	}
 
 	var rows []string
 	for i := 0; i < topPad; i++ {
 		rows = append(rows, "")
 	}
-	for cy := 0; cy < actualCharH; cy++ {
+	for cy := 0; cy < cellsH; cy++ {
 		var line strings.Builder
 		line.WriteString(padStr)
-		for cx := 0; cx < actualCharW; cx++ {
-			line.WriteString(styleFor(px[cy*2][cx], px[cy*2+1][cx]).Render("▀"))
+		for cx := 0; cx < cellsW; cx++ {
+			// The cell's 2×2 subpixels, in TL, TR, BL, BR order.
+			quad := [4]rgbColor{
+				px[cy*2][cx*2], px[cy*2][cx*2+1],
+				px[cy*2+1][cx*2], px[cy*2+1][cx*2+1],
+			}
+
+			// Split into bright/dark clusters around the mean luminance.
+			// The brightest subpixel always meets a >=-mean threshold, so
+			// the mask is never 0 — every cell paints at least one quadrant.
+			var mean float64
+			for _, c := range quad {
+				mean += lum(c)
+			}
+			mean /= 4
+
+			var mask int
+			var fgSum, bgSum [3]uint64
+			var fgN, bgN uint64
+			for i, c := range quad {
+				if lum(c) >= mean {
+					mask |= 8 >> i
+					fgSum[0] += uint64(c.R)
+					fgSum[1] += uint64(c.G)
+					fgSum[2] += uint64(c.B)
+					fgN++
+				} else {
+					bgSum[0] += uint64(c.R)
+					bgSum[1] += uint64(c.G)
+					bgSum[2] += uint64(c.B)
+					bgN++
+				}
+			}
+
+			fg := rgbColor{uint8(fgSum[0] / fgN), uint8(fgSum[1] / fgN), uint8(fgSum[2] / fgN)}
+			bg := fg // uniform cell (mask 15): bg unused by █ but keep it defined
+			if bgN > 0 {
+				bg = rgbColor{uint8(bgSum[0] / bgN), uint8(bgSum[1] / bgN), uint8(bgSum[2] / bgN)}
+			}
+			line.WriteString(styleFor(fg, bg).Render(quadrantChars[mask]))
 		}
 		rows = append(rows, line.String())
 	}
