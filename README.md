@@ -63,7 +63,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - **Spotify playback** — stream your library, search the Spotify catalog, and control playback entirely from the terminal (Premium required for audio).
 - **Real-time audio visualizer** — a CAVA-style spectrum analyzer (the engine behind the popular "Kurve" desktop widget) that's tightly synced to the **beat and tempo**, with a horizontal rainbow gradient and a live BPM readout. Tunable at runtime — see [Audio Visualizer](#audio-visualizer).
 - **Synced lyrics** — line-synced lyrics that scroll with the music, inline or full-screen.
-- **Album artwork** — the current cover rendered right in your terminal.
+- **Album artwork** — the current cover rendered right in your terminal. **Pixel-perfect** in terminals that support kitty-graphics Unicode placeholders ([kitty](https://sw.kovidgoyal.net/kitty/), [Ghostty](https://ghostty.org)); crisp block art everywhere else (iTerm2, Warp, Konsole, Terminal.app, tmux). Override auto-detection with `MUSICTUI_ARTWORK=blocks` or `MUSICTUI_ARTWORK=kitty`.
 - **Full library & playlist management** — browse, search, and create / edit / delete / reorder playlists, move tracks between them, and clean up duplicate or empty playlists.
 - **Library import** — bring your playlists and liked songs over from **YouTube Music** and **Apple Music**.
 - **Media-key support** (Linux / D-Bus) plus a fast, fully keyboard-driven UI.
