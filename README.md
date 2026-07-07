@@ -2,6 +2,7 @@
 
 A terminal-based music player for Spotify. Browse your library, search for music, manage playlists, and stream audio — all from your terminal.
 
+[![CI](https://github.com/iamteedoh/musicTUI/actions/workflows/ci.yml/badge.svg)](https://github.com/iamteedoh/musicTUI/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 ![musicTUI — terminal Spotify player with a real-time, beat-synced audio visualizer](docs/musicTUI_gh.png)
