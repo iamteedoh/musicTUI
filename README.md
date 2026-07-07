@@ -29,7 +29,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
   - [The Queue (Right Panel)](#the-queue-right-panel)
   - [Volume](#volume)
   - [Shuffle and Repeat](#shuffle-and-repeat)
-- [Browsing Your Library](#browsing-your-library)
+- [Liked Songs (Your Library)](#liked-songs-your-library)
 - [Searching for Music](#searching-for-music)
   - [How to Search](#how-to-search)
   - [Exploring Results](#exploring-results)
@@ -199,7 +199,7 @@ The app has three main areas on screen:
 | NAVIGATION  |     CONTENT AREA        |    TRACKLIST    |
 |             |                         |    (Queue)      |
 | Home        |  (changes based on      |                 |
-| Library     |   what you select       |  Shows upcoming |
+| Liked Songs |   what you select       |  Shows upcoming |
 | Search      |   in the sidebar)       |  tracks         |
 | Playlists   |                         |                 |
 | Lyrics      |                         +-----------------+
@@ -247,7 +247,7 @@ The sidebar has two sections:
 | **Space** | Play or pause the current track |
 | **n** | Skip to the next track |
 | **p** | Go back to the previous track |
-| **Enter** | Play the selected track (in Library, Search results, Playlist, or Queue) |
+| **Enter** | Play the selected track (in Liked Songs, Search results, Playlist, or Queue) |
 
 When you press **Enter** on a track, all visible tracks in that list become your queue. For example, pressing Enter on the 5th track in a playlist queues the entire playlist starting from track 5.
 
@@ -276,9 +276,11 @@ The current volume is shown in the bottom status bar.
 
 ---
 
-## Browsing Your Library
+## Liked Songs (Your Library)
 
-Select **Library** from the sidebar to see your Liked Songs (saved tracks).
+Select **♥ Liked Songs** from the sidebar to browse your Liked Songs (what the Spotify API calls "saved tracks").
+
+> **Where is the "Liked Songs" playlist?** On spotify.com, Liked Songs is presented as if it were a playlist — but in Spotify's API it isn't one, so it can never appear in the playlists list. It lives here, as its own sidebar entry.
 
 - **j** / **k** — Scroll through your tracks
 - **Enter** — Play the selected track (queues your entire library)
@@ -325,6 +327,8 @@ Your playlists appear in two places:
 
 From either location, press **Enter** on a playlist to see its tracks.
 
+> **Why do I see fewer playlists than on spotify.com?** Spotify's API does not expose **Spotify-created playlists** — Discover Weekly, Release Radar, Daily Mixes, Blends, and editorial lists like Today's Top Hits — to third-party apps (removed for development-mode apps in November 2024). musicTUI shows every playlist the API provides: the ones you own or follow from other users. **Liked Songs** isn't a playlist in the API either — it has its own **♥ Liked Songs** entry in the sidebar.
+
 ### Creating a Playlist
 
 1. Navigate to any playlist in the sidebar's playlist section.
@@ -351,7 +355,7 @@ From either location, press **Enter** on a playlist to see its tracks.
 
 ### Adding a Track to a Playlist
 
-You can add tracks from your Library, Search results, or another playlist.
+You can add tracks from Liked Songs, Search results, or another playlist.
 
 1. Highlight a track.
 2. Press **a**.

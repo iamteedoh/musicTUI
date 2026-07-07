@@ -2046,7 +2046,7 @@ func (a App) viewTitle() string {
 	case model.ViewHome:
 		return "HOME"
 	case model.ViewLibrary:
-		return "LIBRARY"
+		return "LIKED SONGS"
 	case model.ViewSearch:
 		return "SEARCH"
 	case model.ViewPlaylists:
