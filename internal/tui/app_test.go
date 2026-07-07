@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
+	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/model"
+	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
 // A playlist re-fetch (which always restarts at offset 0, e.g. after a
@@ -41,5 +45,32 @@ func TestPlaylistsPaginationStillAccumulates(t *testing.T) {
 	app = m.(App)
 	if got := len(app.playlist.Items); got != 4 {
 		t.Fatalf("after two pages: %d playlists, want 4", got)
+	}
+}
+
+// Pressing r on the Import error screen must trigger the service reconnect
+// (MUS-12's recovery path), not silently cycle the playback repeat mode.
+// The global playback-keys switch used to swallow r before the Import view
+// ever saw it, so "r: reconnect YouTube" did nothing.
+func TestImportErrorScreenReconnectKey(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close() // empty config auto-opens the wizard, which captures keys
+	app.view = model.ViewImport
+	app.importClient = &importbackend.Client{}
+	app.importv.Stage = components.ImportStageError
+	app.importv.Err = fmt.Errorf(`youtube token: google refresh: google token: 400: {"error": "invalid_grant"}`)
+	repeatBefore := app.queue.Repeat
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app = m.(App)
+
+	if app.queue.Repeat != repeatBefore {
+		t.Fatal("r on the Import error screen cycled repeat mode — the playback switch swallowed it again")
+	}
+	if app.importv.Stage != components.ImportStageAwaitingAuth {
+		t.Fatalf("r did not enter the reconnect flow: stage = %v", app.importv.Stage)
+	}
+	if cmd == nil {
+		t.Fatal("r did not return a reauth command")
 	}
 }

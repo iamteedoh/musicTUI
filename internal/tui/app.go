@@ -1165,8 +1165,12 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Playback keys (unless typing in search)
-	if !a.isSearchInputFocused() {
+	// Playback keys (unless typing in search). The Import screen is
+	// excluded: it owns letters that collide with playback bindings —
+	// notably r (reconnect service vs cycle repeat) — and this switch
+	// returns early, so the Import error screen's "r: reconnect" hint
+	// silently cycled repeat mode instead of reconnecting.
+	if !a.isSearchInputFocused() && a.view != model.ViewImport {
 		switch msg.String() {
 		case " ":
 			if a.engine != nil {
