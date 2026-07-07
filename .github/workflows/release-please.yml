@@ -1,0 +1,38 @@
+name: release-please
+
+# Automated versioning + releases from Conventional Commits.
+#
+# On each push to main, release-please opens/updates a "release PR" that bumps
+# the version (fix -> patch, feat -> minor, breaking -> minor while < 1.0.0 via
+# bump-minor-pre-major) and updates CHANGELOG.md. When that release PR is
+# merged, release-please creates the tag + GitHub Release, and the build job
+# below attaches the all-platform binaries to it.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}

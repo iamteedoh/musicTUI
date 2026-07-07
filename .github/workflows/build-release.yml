@@ -1,0 +1,146 @@
+name: build-release
+
+# Reusable workflow: builds the all-platform binaries for a given tag and
+# attaches them to that tag's GitHub Release. Called by release.yml (manual
+# tag push) and release-please.yml (automated release).
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag to build and attach binaries to.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+            bridge_bin: player-bridge
+            audio_deps: libasound2-dev
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+            bridge_bin: player-bridge
+            audio_deps: libasound2-dev
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+            bridge_bin: player-bridge
+            audio_deps: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+            bridge_bin: player-bridge
+            audio_deps: ""
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            bridge_bin: player-bridge.exe
+            audio_deps: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+
+      - name: Install Linux audio deps
+        if: matrix.audio_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.audio_deps }}
+
+      - name: Build player-bridge (Rust)
+        working-directory: bridge
+        run: cargo build --bin player-bridge --release
+
+      - name: Embed bridge into Go binary
+        shell: bash
+        env:
+          BRIDGE_BIN: ${{ matrix.bridge_bin }}
+        run: |
+          mkdir -p bridge-bin
+          cp "bridge/target/release/${BRIDGE_BIN}" bridge-bin/
+
+      - name: Build musicTUI (Go with embedded bridge)
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ inputs.tag }}
+        run: |
+          EXT=""
+          if [ "${GOOS}" = "windows" ]; then EXT=".exe"; fi
+          go build -ldflags "-s -w -X main.Version=${VERSION}" -o "musicTUI${EXT}" .
+
+      - name: Package (Unix)
+        if: matrix.goos != 'windows'
+        shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir -p pkg
+          cp musicTUI pkg/
+          chmod +x pkg/musicTUI
+          cd pkg && tar czf "../musicTUI-${VERSION}-${SUFFIX}.tar.gz" *
+
+      - name: Package (Windows)
+        if: matrix.goos == 'windows'
+        shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir -p pkg
+          cp musicTUI.exe pkg/
+          cd pkg && 7z a "../musicTUI-${VERSION}-${SUFFIX}.zip" *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: musicTUI-${{ inputs.tag }}-${{ matrix.suffix }}
+          path: musicTUI-${{ inputs.tag }}-${{ matrix.suffix }}.*
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Attach binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            musicTUI-${{ inputs.tag }}-linux-amd64.tar.gz
+            musicTUI-${{ inputs.tag }}-linux-arm64.tar.gz
+            musicTUI-${{ inputs.tag }}-darwin-arm64.tar.gz
+            musicTUI-${{ inputs.tag }}-darwin-amd64.tar.gz
+            musicTUI-${{ inputs.tag }}-windows-amd64.zip
