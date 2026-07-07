@@ -53,16 +53,19 @@ type App struct {
 	playing              components.NowPlaying
 	viz                  *components.MiniVisualizer
 	lyrics               components.Lyrics
-	artwork              components.Artwork
-	settings             components.Settings
-	importv              components.Import
-	importsetup          components.ImportSetup
-	importClient         *importbackend.Client
-	importEvents         <-chan importer.Event // active import event stream; nil when no import is running
-	importEventsCancel   context.CancelFunc    // cancels the importer goroutine on view exit
-	playback             model.PlaybackState
-	queue                model.Queue
-	status               string
+	// Pointer (like viz): Artwork holds a mutex and, in hi-res mode, mutates
+	// its kitty-graphics bookkeeping during View — state that must survive
+	// Bubble Tea's per-frame copies of App.
+	artwork            *components.Artwork
+	settings           components.Settings
+	importv            components.Import
+	importsetup        components.ImportSetup
+	importClient       *importbackend.Client
+	importEvents       <-chan importer.Event // active import event stream; nil when no import is running
+	importEventsCancel context.CancelFunc    // cancels the importer goroutine on view exit
+	playback           model.PlaybackState
+	queue              model.Queue
+	status             string
 
 	// viewCache memoizes the expensive lipgloss panel renders (borders/margins)
 	// for regions that don't change every frame. Pointer so it persists across
@@ -121,7 +124,6 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		viz:         components.NewMiniVisualizer(),
 		cache:       &viewCache{},
 		lyrics:      components.NewLyrics(),
-		artwork:     components.NewArtwork(),
 		settings:    components.NewSettings(),
 		importv:     components.NewImport(),
 		importsetup: components.NewImportSetup(),
@@ -130,6 +132,12 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		queue:       model.NewQueue(),
 		bridgePath:  bridgePath,
 	}
+	// Pixel-perfect album art where the terminal supports kitty-graphics
+	// Unicode placeholders (kitty, Ghostty); error-minimized block art
+	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides).
+	art := components.NewArtwork()
+	app.artwork = &art
+	app.artwork.SetStyle(components.DetectArtworkStyle())
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
 	} else {
@@ -206,6 +214,17 @@ func listenMprisCmd(srv *mpris.Server) tea.Cmd {
 // and the audio-output delay compensation were dialed in at 60 fps); the
 // per-frame cost is kept low by precomputing the visualizer's per-cell colors
 // (see miniviz rebuild) rather than styling each cell every frame.
+// writeRawCmd writes escape sequences directly to the terminal, bypassing
+// Bubble Tea's renderer. Used for kitty-graphics payloads (image transmit /
+// placement / delete): invisible control data that must not be diffed,
+// cached, or truncated the way view content is.
+func writeRawCmd(seq string) tea.Cmd {
+	return func() tea.Msg {
+		_, _ = os.Stdout.WriteString(seq)
+		return nil
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second/60, func(t time.Time) tea.Msg {
 		return TickMsg{}
@@ -384,6 +403,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())
 		a.viz.Update(a.playback.IsPlaying)
+		// Flush any queued kitty-graphics escapes (image transmit/placement)
+		// straight to the terminal — control data, not view content.
+		if oob := a.artwork.TakeOOB(); oob != "" {
+			return a, tea.Batch(tickCmd(), writeRawCmd(oob))
+		}
 		return a, tickCmd()
 
 	// Auth
