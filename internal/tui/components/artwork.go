@@ -134,7 +134,7 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 		imgHeight = 3
 	}
 
-	imgStr := a.renderDotMatrix(width, imgHeight)
+	imgStr := a.renderHalfBlocks(width, imgHeight)
 
 	// Album info text
 	maxW := width - 2
@@ -155,36 +155,46 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	return imgStr + "\n" + info
 }
 
-// Bayer 4x2 ordered dither matrix
-var bayer = [4][2]float64{
-	{0.1, 0.6},
-	{0.8, 0.3},
-	{0.2, 0.7},
-	{0.9, 0.4},
-}
-
-func (a *Artwork) renderDotMatrix(width, height int) string {
+// renderHalfBlocks draws the artwork as solid color using the upper-half
+// block (▀): each character cell shows TWO image pixels — foreground colors
+// the top half, background colors the bottom half. Unlike the previous
+// braille dot-matrix (sparse dots, dark areas rendered as blank space, one
+// color per 8 dots), every cell is fully painted in true color, so the art
+// reads as a continuous image. Downscaling box-filters the source (averages
+// every source pixel in the target region) to avoid sampling noise.
+func (a *Artwork) renderHalfBlocks(width, height int) string {
 	bounds := a.img.Bounds()
-	srcW := float64(bounds.Max.X - bounds.Min.X)
-	srcH := float64(bounds.Max.Y - bounds.Min.Y)
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW == 0 || srcH == 0 {
+		return ""
+	}
 
+	// Terminal cells are ~1:2 (w:h); one cell = 1 pixel wide × 2 pixels tall,
+	// which makes the sub-pixels roughly square, so a square cover stays square.
 	charW := width - 2
 	charH := height
-	dotW := charW * 2
-	dotH := charH * 4
+	pxW := charW
+	pxH := charH * 2
 
-	scaleX := srcW / float64(dotW)
-	scaleY := srcH / float64(dotH)
-	scale := scaleX
-	if scaleY > scale {
-		scale = scaleY
+	// Fit preserving aspect ratio.
+	scale := float64(srcW) / float64(pxW)
+	if s := float64(srcH) / float64(pxH); s > scale {
+		scale = s
 	}
-	if scale < 1 {
-		scale = 1
+	actualPxW := int(float64(srcW) / scale)
+	actualPxH := int(float64(srcH) / scale)
+	if actualPxW < 1 {
+		actualPxW = 1
 	}
+	if actualPxH < 2 {
+		actualPxH = 2
+	}
+	actualCharW := actualPxW
+	actualCharH := actualPxH / 2
 
-	actualCharW := int(srcW / scale / 2)
-	actualCharH := int(srcH / scale / 4)
+	// Box-filter the source into the target pixel grid.
+	px := boxScale(a.img, actualPxW, actualCharH*2)
 
 	leftPad := (width - actualCharW) / 2
 	if leftPad < 0 {
@@ -196,110 +206,70 @@ func (a *Artwork) renderDotMatrix(width, height int) string {
 	}
 	padStr := strings.Repeat(" ", leftPad)
 
+	// Styles repeat heavily across cells (flat color areas); cache them.
+	styles := make(map[uint64]lipgloss.Style)
+	styleFor := func(top, bot rgbColor) lipgloss.Style {
+		key := uint64(top.R)<<40 | uint64(top.G)<<32 | uint64(top.B)<<24 |
+			uint64(bot.R)<<16 | uint64(bot.G)<<8 | uint64(bot.B)
+		st, ok := styles[key]
+		if !ok {
+			st = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", top.R, top.G, top.B))).
+				Background(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", bot.R, bot.G, bot.B)))
+			styles[key] = st
+		}
+		return st
+	}
+
 	var rows []string
 	for i := 0; i < topPad; i++ {
 		rows = append(rows, "")
 	}
-
 	for cy := 0; cy < actualCharH; cy++ {
 		var line strings.Builder
 		line.WriteString(padStr)
-
 		for cx := 0; cx < actualCharW; cx++ {
-			var rSum, gSum, bSum float64
-			var count float64
-			var mask int
-
-			for dy := 0; dy < 4; dy++ {
-				for dx := 0; dx < 2; dx++ {
-					sx := int(float64(cx*2+dx) * scale)
-					sy := int(float64(cy*4+dy) * scale)
-
-					if sx >= int(srcW) {
-						sx = int(srcW) - 1
-					}
-					if sy >= int(srcH) {
-						sy = int(srcH) - 1
-					}
-
-					r, g, b, _ := a.img.At(bounds.Min.X+sx, bounds.Min.Y+sy).RGBA()
-					rf, gf, bf := float64(r>>8), float64(g>>8), float64(b>>8)
-					lum := (0.299*rf + 0.587*gf + 0.114*bf) / 255.0
-
-					rSum += rf
-					gSum += gf
-					bSum += bf
-					count++
-
-					// Dither: turn on dot if luminance is above bayer threshold
-					if lum > bayer[dy][dx] {
-						var bit int
-						switch {
-						case dx == 0 && dy < 3:
-							bit = dy
-						case dx == 1 && dy < 3:
-							bit = dy + 3
-						case dx == 0 && dy == 3:
-							bit = 6
-						case dx == 1 && dy == 3:
-							bit = 7
-						}
-						mask |= 1 << bit
-					}
-				}
-			}
-
-			if mask == 0 {
-				line.WriteString(" ")
-				continue
-			}
-
-			// Use average color for the active dots
-			ru, gu, bu := boostColor(uint8(rSum/count), uint8(gSum/count), uint8(bSum/count))
-			col := lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", ru, gu, bu))
-
-			char := rune(0x2800 + mask)
-			line.WriteString(lipgloss.NewStyle().Foreground(col).Render(string(char)))
+			line.WriteString(styleFor(px[cy*2][cx], px[cy*2+1][cx]).Render("▀"))
 		}
 		rows = append(rows, line.String())
 	}
-
 	return strings.Join(rows, "\n")
 }
 
-// boostColor increases saturation and brightness for better visibility in TUI.
-func boostColor(r, g, b uint8) (uint8, uint8, uint8) {
-	rf, gf, bf := float64(r), float64(g), float64(b)
-	avg := (rf + gf + bf) / 3.0
+// boxScale downscales img to dstW×dstH by averaging every source pixel that
+// falls in each target cell (box filter) — smooth and free of the aliasing a
+// single-sample (nearest-neighbor) scale produces.
+func boxScale(img image.Image, dstW, dstH int) [][]rgbColor {
+	bounds := img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
 
-	// Boost saturation 1.2x
-	rf = avg + (rf-avg)*1.2
-	gf = avg + (gf-avg)*1.2
-	bf = avg + (bf-avg)*1.2
-
-	// Brightness lift 1.1x
-	rf *= 1.1
-	gf *= 1.1
-	bf *= 1.1
-
-	if rf > 255 {
-		rf = 255
+	out := make([][]rgbColor, dstH)
+	for y := 0; y < dstH; y++ {
+		out[y] = make([]rgbColor, dstW)
+		sy0 := y * srcH / dstH
+		sy1 := (y + 1) * srcH / dstH
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		for x := 0; x < dstW; x++ {
+			sx0 := x * srcW / dstW
+			sx1 := (x + 1) * srcW / dstW
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+			var rSum, gSum, bSum, n uint64
+			for sy := sy0; sy < sy1; sy++ {
+				for sx := sx0; sx < sx1; sx++ {
+					r, g, b, _ := img.At(bounds.Min.X+sx, bounds.Min.Y+sy).RGBA()
+					rSum += uint64(r >> 8)
+					gSum += uint64(g >> 8)
+					bSum += uint64(b >> 8)
+					n++
+				}
+			}
+			out[y][x] = rgbColor{uint8(rSum / n), uint8(gSum / n), uint8(bSum / n)}
+		}
 	}
-	if gf > 255 {
-		gf = 255
-	}
-	if bf > 255 {
-		bf = 255
-	}
-	if rf < 0 {
-		rf = 0
-	}
-	if gf < 0 {
-		gf = 0
-	}
-	if bf < 0 {
-		bf = 0
-	}
-
-	return uint8(rf), uint8(gf), uint8(bf)
+	return out
 }
