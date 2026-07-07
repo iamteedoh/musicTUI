@@ -513,8 +513,10 @@ func (i Import) topErrorReasons(limit int) []string {
 	out := make([]string, 0, limit)
 	for k := 0; k < len(all) && k < limit; k++ {
 		r := all[k].reason
-		if len(r) > 70 {
-			r = r[:69] + "…"
+		// Rune-aware: byte-slicing could cut a multi-byte rune (the error
+		// strings contain "→") and render a garbled tail.
+		if rs := []rune(r); len(rs) > 70 {
+			r = string(rs[:69]) + "…"
 		}
 		out = append(out, fmt.Sprintf("%s  (%d×)", r, all[k].count))
 	}
