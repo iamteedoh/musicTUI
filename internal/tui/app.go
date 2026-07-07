@@ -1312,6 +1312,11 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		a.importsetup.Close()
 		return a, nil
+	case "ctrl+u":
+		// Clear the field under the cursor — essential for replacing a
+		// masked secret you can't read.
+		a.importsetup.ClearField()
+		return a, nil
 	case "left", "h":
 		if !a.importsetup.IsInputStep() {
 			a.importsetup.Prev()
