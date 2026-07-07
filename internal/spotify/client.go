@@ -26,6 +26,7 @@ const (
 type Client struct {
 	sp         *spotifylib.Client
 	httpClient *http.Client // raw HTTP client for endpoints the library doesn't handle
+	baseURL    string       // Spotify Web API base URL; overridable in tests
 	username   string
 	userID     string
 	mu         sync.RWMutex
@@ -33,7 +34,7 @@ type Client struct {
 
 // NewClient creates an authenticated Spotify client.
 func NewClient(sp *spotifylib.Client, httpClient *http.Client) *Client {
-	return &Client{sp: sp, httpClient: httpClient}
+	return &Client{sp: sp, httpClient: httpClient, baseURL: spotifyBaseURL}
 }
 
 // isHTTPSuccess reports whether code is any 2xx status. Spotify's write
@@ -142,12 +143,15 @@ func (c *Client) apiDeleteWithBody(ctx context.Context, url string, body any) er
 }
 
 // CreatePlaylist creates a new playlist for the current user.
+//
+// Uses POST /me/playlists: Spotify's February 2026 Development Mode
+// migration removed the old POST /users/{user_id}/playlists endpoint (the
+// whole /users/{id} family), which returned a bare 403 Forbidden. This app
+// is permanently in Development Mode (Extended Quota Mode requires a
+// registered org with ~250k MAU as of April 2025), so the /me/*-centric
+// endpoint surface is the one to build against.
 func (c *Client) CreatePlaylist(ctx context.Context, name, description string, public bool) (model.Playlist, error) {
-	uid := c.UserID()
-	if uid == "" {
-		return model.Playlist{}, fmt.Errorf("user ID not available")
-	}
-	url := fmt.Sprintf("%s/users/%s/playlists", spotifyBaseURL, uid)
+	url := fmt.Sprintf("%s/me/playlists", c.baseURL)
 	body := map[string]any{
 		"name":        name,
 		"description": description,
@@ -162,7 +166,7 @@ func (c *Client) CreatePlaylist(ctx context.Context, name, description string, p
 
 // UpdatePlaylistDetails updates a playlist's name and/or description.
 func (c *Client) UpdatePlaylistDetails(ctx context.Context, playlistID, name, description string) error {
-	url := fmt.Sprintf("%s/playlists/%s", spotifyBaseURL, playlistID)
+	url := fmt.Sprintf("%s/playlists/%s", c.baseURL, playlistID)
 	body := map[string]string{
 		"name":        name,
 		"description": description,
@@ -172,7 +176,7 @@ func (c *Client) UpdatePlaylistDetails(ctx context.Context, playlistID, name, de
 
 // DeletePlaylist unfollows (removes) a playlist from the user's library.
 func (c *Client) DeletePlaylist(ctx context.Context, playlistID string) error {
-	url := fmt.Sprintf("%s/playlists/%s/followers", spotifyBaseURL, playlistID)
+	url := fmt.Sprintf("%s/playlists/%s/followers", c.baseURL, playlistID)
 	return c.apiDeleteWithBody(ctx, url, nil)
 }
 
@@ -181,20 +185,20 @@ func (c *Client) DeletePlaylist(ctx context.Context, playlistID string) error {
 // object), re-following by the same ID fully restores a previously removed
 // playlist with all of its tracks intact — this is the primary recovery path.
 func (c *Client) FollowPlaylist(ctx context.Context, playlistID string) error {
-	url := fmt.Sprintf("%s/playlists/%s/followers", spotifyBaseURL, playlistID)
+	url := fmt.Sprintf("%s/playlists/%s/followers", c.baseURL, playlistID)
 	return c.apiPut(ctx, url, map[string]any{"public": false})
 }
 
 // AddTracksToPlaylist adds tracks to a playlist by their URIs.
 func (c *Client) AddTracksToPlaylist(ctx context.Context, playlistID string, trackURIs []string) error {
-	url := fmt.Sprintf("%s/playlists/%s/items", spotifyBaseURL, playlistID)
+	url := fmt.Sprintf("%s/playlists/%s/items", c.baseURL, playlistID)
 	body := map[string]any{"uris": trackURIs}
 	return c.apiPost(ctx, url, body, nil)
 }
 
 // RemoveTracksFromPlaylist removes tracks from a playlist by their URIs.
 func (c *Client) RemoveTracksFromPlaylist(ctx context.Context, playlistID string, trackURIs []string) error {
-	url := fmt.Sprintf("%s/playlists/%s/items", spotifyBaseURL, playlistID)
+	url := fmt.Sprintf("%s/playlists/%s/items", c.baseURL, playlistID)
 	tracks := make([]map[string]string, len(trackURIs))
 	for i, uri := range trackURIs {
 		tracks[i] = map[string]string{"uri": uri}
@@ -286,7 +290,7 @@ func (c *Client) GetPlaylists(ctx context.Context, offset, limit int) (model.Pag
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
-	url := fmt.Sprintf("%s/me/playlists?limit=%d&offset=%d", spotifyBaseURL, limit, offset)
+	url := fmt.Sprintf("%s/me/playlists?limit=%d&offset=%d", c.baseURL, limit, offset)
 
 	var raw rawPlaylistPage
 	if err := c.apiGet(ctx, url, &raw); err != nil {
@@ -311,7 +315,7 @@ func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string, offse
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
-	url := fmt.Sprintf("%s/playlists/%s/items?limit=%d&offset=%d", spotifyBaseURL, playlistID, limit, offset)
+	url := fmt.Sprintf("%s/playlists/%s/items?limit=%d&offset=%d", c.baseURL, playlistID, limit, offset)
 
 	var raw rawPlaylistItemsPage
 	if err := c.apiGet(ctx, url, &raw); err != nil {
@@ -393,7 +397,7 @@ func (c *Client) Search(ctx context.Context, query string, offset ...int) (model
 		off = offset[0]
 	}
 
-	searchLimit := 20 // Spotify search API max per type
+	searchLimit := 10 // Feb 2026 Development Mode caps search limit at 10 per type
 	sr, err := c.sp.Search(ctx, query,
 		spotifylib.SearchTypeTrack|spotifylib.SearchTypeAlbum|spotifylib.SearchTypeArtist|spotifylib.SearchTypePlaylist,
 		spotifylib.Limit(searchLimit), spotifylib.Offset(off),

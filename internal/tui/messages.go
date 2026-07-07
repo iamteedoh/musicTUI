@@ -151,9 +151,31 @@ func FetchLibraryCmd(client *sp.Client, offset int) tea.Cmd {
 	}
 }
 
+// fetchPageWithRetry runs fetch up to three times with linear backoff
+// (1s, 2s). The auto-pagination chains (each loaded page fetches the next)
+// previously died silently on the first error — under Development Mode rate
+// limits (429) that left a playlist stuck showing a partial page of tracks
+// until some unrelated action happened to re-fetch (MUS-11).
+func fetchPageWithRetry[T any](fetch func() (model.Page[T], error)) (model.Page[T], error) {
+	var page model.Page[T]
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		page, err = fetch()
+		if err == nil {
+			return page, nil
+		}
+	}
+	return page, err
+}
+
 func FetchPlaylistsCmd(client *sp.Client, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetPlaylists(context.Background(), offset, 50)
+		page, err := fetchPageWithRetry(func() (model.Page[model.Playlist], error) {
+			return client.GetPlaylists(context.Background(), offset, 50)
+		})
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
@@ -163,7 +185,9 @@ func FetchPlaylistsCmd(client *sp.Client, offset int) tea.Cmd {
 
 func FetchPlaylistTracksCmd(client *sp.Client, playlistID string, offset int) tea.Cmd {
 	return func() tea.Msg {
-		page, err := client.GetPlaylistTracks(context.Background(), playlistID, offset, 50)
+		page, err := fetchPageWithRetry(func() (model.Page[model.Track], error) {
+			return client.GetPlaylistTracks(context.Background(), playlistID, offset, 50)
+		})
 		if err != nil {
 			return DataErrorMsg{Err: err}
 		}
