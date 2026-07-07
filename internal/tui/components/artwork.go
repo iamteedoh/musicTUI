@@ -2,6 +2,7 @@ package components
 
 import (
 	"fmt"
+	"hash/crc32"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -22,6 +23,17 @@ type Artwork struct {
 	err       string
 	albumName string
 	artist    string
+
+	// Kitty-graphics (hi-res) state. When hiRes is set the panel renders a
+	// Unicode-placeholder grid and queues the protocol escapes (transmit /
+	// placement / delete) in oob; the app layer flushes that queue straight
+	// to the terminal between frames (it must bypass Bubble Tea's diffing).
+	hiRes          bool
+	kittyID        uint32
+	transmittedURL string // image URL already transmitted under kittyID
+	placedCols     int
+	placedRows     int
+	oob            strings.Builder
 }
 
 type rgbColor struct{ R, G, B uint8 }
@@ -79,6 +91,26 @@ func (a *Artwork) SetImage(_ [][]rgbColor, _, _ int, _ string) {}
 func (a *Artwork) SetGray(_ [][]uint8, _, _ int, _ string)     {}
 func (a *Artwork) SetTrackInfo(_, _, _ string)                 {}
 
+// SetHiRes selects the kitty-graphics renderer (true pixel artwork) instead
+// of quadrant blocks. Call once at startup after terminal detection.
+func (a *Artwork) SetHiRes(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.hiRes = v
+}
+
+// TakeOOB drains the queued kitty-protocol escapes. The app layer writes
+// them directly to the terminal (out of band of Bubble Tea's renderer) —
+// they carry image data, not visible text, so they must not be diffed,
+// cached, or truncated like view content.
+func (a *Artwork) TakeOOB() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.oob.String()
+	a.oob.Reset()
+	return s
+}
+
 func FetchArtwork(url string) ArtworkResult {
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Get(url)
@@ -114,8 +146,9 @@ func (a *Artwork) Signature() string {
 }
 
 func (a *Artwork) View(th theme.Theme, width, height int) string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	// Full lock: the hi-res path queues protocol escapes as a side effect.
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	if a.loading {
 		return cText(lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("Loading..."), width, height)
@@ -134,7 +167,12 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 		imgHeight = 3
 	}
 
-	imgStr := a.renderQuadrants(width, imgHeight)
+	var imgStr string
+	if a.hiRes {
+		imgStr = a.renderPlaceholders(width, imgHeight)
+	} else {
+		imgStr = a.renderQuadrants(width, imgHeight)
+	}
 
 	// Album info text
 	maxW := width - 2
@@ -153,6 +191,88 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	info := centerLn(accent.Render(album), width) + "\n" + centerLn(dim.Render(artist), width)
 
 	return imgStr + "\n" + info
+}
+
+// renderPlaceholders draws the artwork as a kitty-graphics Unicode
+// placeholder grid: real pixels, rendered by the terminal itself. Queues the
+// transmit/placement escapes in a.oob when the image or grid size changes
+// (flushed out-of-band by the app layer). Falls back to quadrant blocks if
+// PNG encoding fails. Caller must hold a.mu.
+func (a *Artwork) renderPlaceholders(width, height int) string {
+	bounds := a.img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW == 0 || srcH == 0 {
+		return ""
+	}
+
+	// Same 1-wide × 2-tall cell aspect math as the block renderer, capped by
+	// the diacritic table so every cell stays addressable.
+	charW := width - 2
+	charH := height
+	scale := float64(srcW) / float64(charW)
+	if s := float64(srcH) / float64(charH*2); s > scale {
+		scale = s
+	}
+	cellsW := int(float64(srcW) / scale)
+	cellsH := int(float64(srcH) / scale / 2)
+	if cellsW < 1 {
+		cellsW = 1
+	}
+	if cellsH < 1 {
+		cellsH = 1
+	}
+	if max := maxKittyGridDim(); cellsW > max {
+		cellsW = max
+	}
+	if max := maxKittyGridDim(); cellsH > max {
+		cellsH = max
+	}
+
+	id := crc32.ChecksumIEEE([]byte(a.imageURL)) & 0xFFFFFF
+	if id == 0 {
+		id = 1
+	}
+
+	// Reconcile terminal-side state: transmit on a new image, re-place on a
+	// grid-size change. Cache hits in the app's view cache skip this whole
+	// function, so escapes are only queued when something actually changed.
+	if a.transmittedURL != a.imageURL {
+		if a.kittyID != 0 && a.kittyID != id {
+			a.oob.WriteString(kittyDelete(a.kittyID))
+		}
+		tx, err := kittyTransmit(id, a.img)
+		if err != nil {
+			return a.renderQuadrants(width, height)
+		}
+		a.oob.WriteString(tx)
+		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
+		a.kittyID = id
+		a.transmittedURL = a.imageURL
+		a.placedCols, a.placedRows = cellsW, cellsH
+	} else if a.placedCols != cellsW || a.placedRows != cellsH {
+		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
+		a.placedCols, a.placedRows = cellsW, cellsH
+	}
+
+	leftPad := (width - cellsW) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	topPad := (height - cellsH) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+	padStr := strings.Repeat(" ", leftPad)
+
+	var rows []string
+	for i := 0; i < topPad; i++ {
+		rows = append(rows, "")
+	}
+	for r := 0; r < cellsH; r++ {
+		rows = append(rows, padStr+kittyPlaceholderRow(id, r, cellsW))
+	}
+	return strings.Join(rows, "\n")
 }
 
 // quadrantChars maps a 4-bit "bright subpixel" mask (TL=8, TR=4, BL=2, BR=1)

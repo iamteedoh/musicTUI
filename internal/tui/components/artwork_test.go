@@ -80,6 +80,44 @@ func TestQuadrantGlyphSelection(t *testing.T) {
 	}
 }
 
+// Hi-res mode must render a placeholder grid and queue the kitty-graphics
+// escapes exactly once per image/size — never on every frame (a re-queue per
+// frame would retransmit the full PNG 60×/second).
+func TestArtworkHiResQueuesOncePerImage(t *testing.T) {
+	th := theme.FromName("")
+	var a Artwork
+	a.SetHiRes(true)
+	a.LoadURL("u1")
+	a.SetFullImage(fillImage(64, 64, color.RGBA{50, 90, 200, 255}), "u1")
+	a.SetAlbumInfo("A", "B")
+
+	out := a.View(th, 20, 14)
+	if !strings.ContainsRune(out, placeholderRune) {
+		t.Fatalf("hi-res render has no U+10EEEE placeholder cells")
+	}
+
+	oob := a.TakeOOB()
+	if !strings.Contains(oob, "\x1b_Ga=t,") || !strings.Contains(oob, "a=p,") {
+		t.Fatalf("first render did not queue transmit+placement: %q", oob[:min(len(oob), 120)])
+	}
+
+	// Same image, same size: nothing new to send.
+	_ = a.View(th, 20, 14)
+	if again := a.TakeOOB(); again != "" {
+		t.Fatalf("unchanged render re-queued escapes (would retransmit every frame): %q", again[:min(len(again), 120)])
+	}
+
+	// Size change: only a (tiny) re-placement, not a retransmit.
+	_ = a.View(th, 30, 20)
+	rePlace := a.TakeOOB()
+	if !strings.Contains(rePlace, "a=p,") {
+		t.Fatalf("resize did not re-place the image")
+	}
+	if strings.Contains(rePlace, "a=t,") {
+		t.Fatalf("resize retransmitted the whole image")
+	}
+}
+
 // A square cover must stay square-ish: rendered rows ≈ cells wide / 2 ratio
 // held by the 1×2 pixel-per-cell mapping, and it must fit the given box.
 func TestArtworkFitsPanel(t *testing.T) {
