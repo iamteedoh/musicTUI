@@ -4,6 +4,9 @@ A terminal-based music player for Spotify. Browse your library, search for music
 
 [![CI](https://github.com/iamteedoh/musicTUI/actions/workflows/ci.yml/badge.svg)](https://github.com/iamteedoh/musicTUI/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/iamteedoh)
+[![Patreon](https://img.shields.io/badge/Patreon-support-f96854?logo=patreon)](https://patreon.com/iamteedoh)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/iamteedoh)
 
 ![musicTUI — terminal Spotify player with a real-time, beat-synced audio visualizer](docs/musicTUI_gh.png)
 
@@ -733,6 +736,16 @@ Planned features for future releases:
 - **Local Music Playback Support**
 
 ---
+
+## Support the Project
+
+musicTUI is free software built in my spare time. If it's useful to you, consider supporting development:
+
+- ❤ [GitHub Sponsors](https://github.com/sponsors/iamteedoh)
+- 🧡 [Patreon](https://patreon.com/iamteedoh)
+- ☕ [Buy Me a Coffee](https://buymeacoffee.com/iamteedoh)
+
+Stars, bug reports, and pull requests are just as appreciated!
 
 ## License
 
