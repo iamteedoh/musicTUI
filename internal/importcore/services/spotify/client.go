@@ -367,9 +367,13 @@ func (c *Client) do(
 			// a single track with Dev-Mode throttling is worse UX
 			// than failing fast and letting the user retry later.
 			if attempt >= maxRetryAttempts || wait > maxRetryWait {
+				// Lead with the decision and keep it short: the TUI shows
+				// live errors on a single line, so the important part
+				// (skipped + how long Spotify wanted) must come first.
+				// The response body is just the 429 JSON — noise here.
 				return &APIError{
 					Status: resp.StatusCode, Method: method, Path: path,
-					Body: fmt.Sprintf("rate-limited; Spotify asked us to wait %s. %s", wait, string(respBody)),
+					Body: fmt.Sprintf("rate-limited (retry-after %s) — track skipped, import continues", wait),
 				}
 			}
 			continue
