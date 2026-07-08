@@ -59,9 +59,14 @@ const (
 
 // DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
 // detection: "kitty" forces pixel graphics, "blocks" and "braille" force the
-// respective character-art styles. Otherwise kitty graphics are enabled on
-// terminals known to render Unicode placeholders (kitty, Ghostty).
-func DetectArtworkStyle() ArtworkStyle {
+// respective character-art styles.
+//
+// kittyProbe is the result of querying the terminal directly for kitty
+// graphics support (see internal/termcap). It is the authoritative signal —
+// env-var sniffing misidentifies Ghostty on Linux, which made pixel artwork
+// silently fall back to block art (MUS-20). The env heuristic below is kept
+// only as a fallback for when the probe couldn't run (e.g. not a TTY).
+func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
 	switch strings.ToLower(os.Getenv("MUSICTUI_ARTWORK")) {
 	case "blocks":
 		return StyleBlocks
@@ -74,6 +79,11 @@ func DetectArtworkStyle() ArtworkStyle {
 	if os.Getenv("TMUX") != "" {
 		return StyleBlocks
 	}
+	// Authoritative: the terminal told us it supports kitty graphics.
+	if kittyProbe {
+		return StyleKitty
+	}
+	// Fallback heuristic when the probe couldn't run (redirected output, etc.).
 	term := os.Getenv("TERM")
 	prog := os.Getenv("TERM_PROGRAM")
 	if strings.Contains(term, "kitty") || os.Getenv("KITTY_WINDOW_ID") != "" {

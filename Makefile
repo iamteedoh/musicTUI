@@ -1,5 +1,10 @@
 APP_NAME    := musicTUI
-LDFLAGS     := -s -w
+# Stamp a meaningful version into local builds so `musicTUI --version` (and the
+# player's title bar) show exactly which commit you're on — e.g.
+# v0.3.0-6-gabc1234, or v0.3.0-6-gabc1234-dirty with uncommitted changes.
+# Tagged release builds override this via the release workflow's -X flag.
+VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS     := -s -w -X main.Version=$(VERSION)
 DIST        := dist
 BRIDGE_BIN  := player-bridge
 
@@ -11,7 +16,7 @@ build: build-bridge
 	cp bridge/target/release/$(BRIDGE_BIN) bridge-bin/
 	@mkdir -p $(DIST)
 	go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP_NAME) .
-	@echo "Built: $(DIST)/$(APP_NAME) (bridge embedded)"
+	@echo "Built: $(DIST)/$(APP_NAME) $(VERSION) (bridge embedded)"
 
 # ── Build Rust player-bridge ─────────────────────────────
 build-bridge:

@@ -26,6 +26,7 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/model"
 	"github.com/iamteedoh/musicTUI/internal/mpris"
 	sp "github.com/iamteedoh/musicTUI/internal/spotify"
+	"github.com/iamteedoh/musicTUI/internal/termcap"
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 	"github.com/iamteedoh/musicTUI/internal/update"
@@ -134,10 +135,13 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	}
 	// Pixel-perfect album art where the terminal supports kitty-graphics
 	// Unicode placeholders (kitty, Ghostty); error-minimized block art
-	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides).
+	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides). The
+	// terminal is queried directly for support (reliable across platforms,
+	// unlike env sniffing which missed Ghostty on Linux — MUS-20). The probe
+	// no-ops on a non-TTY, so tests and piped runs stay side-effect-free.
 	art := components.NewArtwork()
 	app.artwork = &art
-	app.artwork.SetStyle(components.DetectArtworkStyle())
+	app.artwork.SetStyle(components.DetectArtworkStyle(termcap.SupportsKittyGraphics()))
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
 	} else {
@@ -2443,8 +2447,15 @@ func (a App) View() string {
 	// ══════════════════════════════════════════════════════════════
 	grid := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, centerPanel, rightCol)
 
-	// Title line: ─── musicTUI | Terminal Music Player | ● username ───
-	titleStr := "musicTUI | Terminal Music Player"
+	// Title line: ─── musicTUI v0.3.0 | Terminal Music Player | ● username ───
+	// The version is always visible here so a user can tell at a glance which
+	// build they're running (MUS-20) — the same string `musicTUI --version`
+	// prints.
+	titleStr := "musicTUI"
+	if a.version != "" {
+		titleStr += " " + a.version
+	}
+	titleStr += " | Terminal Music Player"
 	if a.home.Username != "" {
 		titleStr += " | ● " + a.home.Username
 	}
