@@ -74,3 +74,62 @@ func TestImportErrorScreenReconnectKey(t *testing.T) {
 		t.Fatal("r did not return a reauth command")
 	}
 }
+
+// On Windows, bubbletea reads the console directly and emits a KeyMsg for every
+// key-down except Shift. Keys that carry no character (a bare Ctrl, Alt,
+// CapsLock or Win press) fall through its keyType() to KeyRunes with a zero
+// Char, so they arrive as Runes: []rune{0}. Those NULs used to be inserted
+// verbatim into the onboarding field: pressing Ctrl to paste a Client ID
+// prefixed it with U+0000, which survived strings.TrimSpace, so Spotify
+// answered "Invalid client id" — MUS-23.
+func TestOnboardClientIDIgnoresWindowsModifierKeyRunes(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.StartAtClientID("")
+
+	// What a Windows console sends for: Ctrl(+V paste of "a1"), then Alt, "b2".
+	keys := []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{0}}, // bare Ctrl
+		{Type: tea.KeyRunes, Runes: []rune{'a'}},
+		{Type: tea.KeyRunes, Runes: []rune{'1'}},
+		{Type: tea.KeyRunes, Runes: []rune{0}, Alt: true}, // bare Alt
+		{Type: tea.KeyRunes, Runes: []rune{'b'}},
+		{Type: tea.KeyRunes, Runes: []rune{'2'}},
+	}
+	for _, k := range keys {
+		m, _ := app.handleOnboardKey(k)
+		app = m.(App)
+	}
+
+	if got := app.onboard.ClientID(); got != "a1b2" {
+		t.Fatalf("ClientID() = %q, want %q — a modifier key-down leaked into the field", got, "a1b2")
+	}
+	if !app.onboard.OnFinalStep() {
+		t.Fatal("a modifier key-down navigated away from the Client ID step")
+	}
+}
+
+// 'h' is vim-style "back" on the wizard's informational steps, but the final
+// step is a text field — there it must type, not navigate.
+func TestOnboardFinalStepTypesHInsteadOfNavigatingBack(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.StartAtClientID("")
+
+	m, _ := app.handleOnboardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	app = m.(App)
+
+	if !app.onboard.OnFinalStep() {
+		t.Fatal("typing 'h' in the Client ID field jumped back a step")
+	}
+	if got := app.onboard.ClientID(); got != "h" {
+		t.Fatalf("ClientID() = %q, want %q", got, "h")
+	}
+
+	// Earlier steps keep the vim binding.
+	app.onboard.Start()
+	app.onboard.Next()
+	m, _ = app.handleOnboardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	app = m.(App)
+	if app.onboard.Step != 0 {
+		t.Fatalf("'h' on step 1 did not navigate back: step = %d", app.onboard.Step)
+	}
+}

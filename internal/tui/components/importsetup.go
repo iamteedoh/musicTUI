@@ -224,13 +224,7 @@ func (w *ImportSetup) Paste(s string) {
 	if !w.IsInputStep() {
 		return
 	}
-	clean := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
-	for _, r := range clean {
+	for _, r := range stripControl(s) {
 		w.InputChar(r)
 	}
 }

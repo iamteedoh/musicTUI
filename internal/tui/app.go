@@ -1251,9 +1251,16 @@ func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		a.onboard.Close()
 		return a, nil
-	case "left", "h":
+	case "left":
 		a.onboard.Prev()
 		return a, nil
+	case "h":
+		// Vim-style back, but only where there's no text field to type into —
+		// on the paste-Client-ID step 'h' is a character, not a navigation key.
+		if !a.onboard.OnFinalStep() {
+			a.onboard.Prev()
+			return a, nil
+		}
 	}
 
 	if a.onboard.OnFinalStep() {
@@ -1301,7 +1308,7 @@ func (a App) handleOnboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.onboard.InputChar(rune(s[0]))
 				return a, nil
 			}
-			for _, r := range msg.Runes {
+			for _, r := range typedRunes(msg) {
 				a.onboard.InputChar(r)
 			}
 			return a, nil
@@ -1442,15 +1449,16 @@ func (a App) handleImportSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.importsetup.Backspace()
 			return a, nil
 		default:
-			if len(msg.Runes) > 1 {
-				a.importsetup.Paste(string(msg.Runes))
+			rs := typedRunes(msg)
+			if len(rs) > 1 {
+				a.importsetup.Paste(string(rs))
 				return a, nil
 			}
 			if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
 				a.importsetup.InputChar(rune(s[0]))
 				return a, nil
 			}
-			for _, r := range msg.Runes {
+			for _, r := range rs {
 				a.importsetup.InputChar(r)
 			}
 			return a, nil
@@ -1543,8 +1551,8 @@ func (a App) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
 				a.modal.InputChar(rune(s[0]))
-			} else if len(msg.Runes) > 0 {
-				for _, r := range msg.Runes {
+			} else {
+				for _, r := range typedRunes(msg) {
 					a.modal.InputChar(r)
 				}
 			}
@@ -1940,8 +1948,8 @@ func (a App) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s := msg.String()
 		if len(s) == 1 && s[0] >= 32 && s[0] < 127 {
 			a.search.InputChar(rune(s[0]))
-		} else if len(msg.Runes) > 0 {
-			for _, r := range msg.Runes {
+		} else {
+			for _, r := range typedRunes(msg) {
 				a.search.InputChar(r)
 			}
 		}

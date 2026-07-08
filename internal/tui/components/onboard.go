@@ -41,11 +41,27 @@ func (o *Onboard) Start() {
 	o.Error = ""
 }
 
+// stripControl removes the C0 controls and DEL from s.
+//
+// A Windows build could write a U+0000 into the saved Client ID (a bare Ctrl
+// press reaches the TUI as a rune — see tui.typedRunes, MUS-23). Such a config
+// must heal itself when the wizard reopens, otherwise the recovery path
+// pre-fills the poisoned value and re-submits the same id Spotify rejected.
+func stripControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // StartAtClientID reopens the wizard directly on the final "paste Client ID"
 // step with the field pre-filled. Use for in-app recovery when a Client ID is
 // already configured but wrong or rejected (Spotify's "Invalid client id"),
 // so the user can correct it without walking the whole wizard again.
 func (o *Onboard) StartAtClientID(current string) {
+	current = stripControl(current)
 	o.Active = true
 	o.Step = TotalSteps - 1
 	o.ClientIDInput = current
@@ -99,9 +115,10 @@ func (o Onboard) OnFinalStep() bool {
 	return o.Step == TotalSteps-1
 }
 
-// ClientID returns the trimmed client ID the user has typed so far.
+// ClientID returns the trimmed client ID the user has typed so far, with any
+// control characters removed so a stray one can never reach Spotify.
 func (o Onboard) ClientID() string {
-	return strings.TrimSpace(o.ClientIDInput)
+	return strings.TrimSpace(stripControl(o.ClientIDInput))
 }
 
 // ─────────────────────────── Rendering ───────────────────────────
