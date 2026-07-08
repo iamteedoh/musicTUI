@@ -89,6 +89,25 @@ func extractEmbeddedBridge() string {
 }
 
 func main() {
+	// Lightweight CLI flags handled before the TUI starts. `--version` lets a
+	// user confirm which build they're running on macOS and Linux (MUS-20);
+	// the same string is shown in the player's title bar.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v", "version":
+			fmt.Printf("musicTUI %s\n", Version)
+			return
+		case "--help", "-h":
+			fmt.Println("musicTUI — a terminal music player for Spotify")
+			fmt.Println("\nUsage:")
+			fmt.Println("  musicTUI            Launch the player")
+			fmt.Println("  musicTUI --version  Print the version and exit")
+			fmt.Println("\nArtwork rendering can be forced with the MUSICTUI_ARTWORK")
+			fmt.Println("environment variable: kitty | blocks | braille.")
+			return
+		}
+	}
+
 	cfg := config.Load()
 	bridgePath := findBridge()
 
