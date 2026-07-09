@@ -149,6 +149,14 @@ func (a *Artwork) Origin() (col, row int) {
 	return a.originCol, a.originRow
 }
 
+// UsesSixel reports whether the cover is painted as a sixel image, whose pixels
+// live outside the character grid and so need special care when the layout moves.
+func (a *Artwork) UsesSixel() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.style == StyleSixel
+}
+
 // SixelDraw returns the cursor-positioned payload for the current cover and the
 // 1-based screen rows it covers. Empty when nothing is drawn with sixel.
 //

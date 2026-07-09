@@ -420,6 +420,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A resize makes Bubble Tea repaint every line unconditionally, which
 		// the row diff can't observe. Force the cover to be painted again.
 		a.cache.artRows = ""
+		if a.artwork.UsesSixel() {
+			// A resize moves the artwork panel, so the cover is repainted at new
+			// coordinates. In some terminals — Konsole — writing text over sixel
+			// pixels does not erase them, so the old copy is orphaned wherever it
+			// was and shows through the tracklist. Only an explicit screen erase
+			// removes it. Normal frames don't need this: the image is redrawn in
+			// exactly the same place, covering itself (MUS-29).
+			return a, tea.ClearScreen
+		}
 		return a, nil
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())

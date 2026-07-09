@@ -309,3 +309,45 @@ func TestSixelRepaintsOnlyWhenItsRowsChange(t *testing.T) {
 		t.Fatal("cover not repainted after the modal was dismissed")
 	}
 }
+
+// Resizing moves the artwork panel, so the cover is repainted at new
+// coordinates. Konsole does not erase sixel pixels when text is written over
+// them, so the old copy stays where it was and bleeds through the tracklist.
+// Only an explicit screen erase clears it — and only sixel needs that, so
+// character-art terminals must not eat a clear-and-full-repaint on every drag
+// of the window edge (MUS-29).
+func TestResizeClearsScreenOnlyForSixel(t *testing.T) {
+	cases := []struct {
+		name      string
+		style     components.ArtworkStyle
+		wantClear bool
+	}{
+		{"sixel needs the erase", components.StyleSixel, true},
+		{"kitty binds pixels to cells", components.StyleKitty, false},
+		{"blocks are just text", components.StyleBlocks, false},
+		{"braille is just text", components.StyleBraille, false},
+	}
+	for _, c := range cases {
+		app := NewApp(config.Config{}, "", "test")
+		app.onboard.Close()
+		app.artwork.SetStyle(c.style)
+
+		m, cmd := app.Update(tea.WindowSizeMsg{Width: 160, Height: 48})
+		app = m.(App)
+
+		if app.width != 160 || app.height != 48 {
+			t.Fatalf("%s: resize was not recorded", c.name)
+		}
+		if app.cache.artRows != "" {
+			t.Errorf("%s: cached artwork rows survived a resize", c.name)
+		}
+
+		gotClear := false
+		if cmd != nil {
+			gotClear = fmt.Sprintf("%T", cmd()) == "tea.clearScreenMsg"
+		}
+		if gotClear != c.wantClear {
+			t.Errorf("%s: clear-screen on resize = %v, want %v", c.name, gotClear, c.wantClear)
+		}
+	}
+}
