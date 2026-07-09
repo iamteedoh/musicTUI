@@ -417,11 +417,15 @@ The right panel shows the current track's album cover. How sharp it looks depend
 
   ![Full-resolution album artwork in Ghostty](docs/artwork_ghostty.png)
 
-- **Pixel-perfect via sixel** — in terminals that speak sixel graphics but not the kitty protocol: **Windows Terminal 1.22+**, WezTerm, xterm (`-ti vt340`), mintty, foot and Konsole. Also detected automatically, so Windows gets the real cover rather than character art.
+- **Pixel-perfect via sixel** — in terminals that speak sixel graphics: **Windows Terminal 1.22+**, WezTerm, xterm (`-ti vt340`), mintty, foot and **Konsole**. Also detected automatically, so Windows gets the real cover rather than character art.
 
 - **Character art** — everywhere else (Terminal.app, Warp, tmux, and any terminal that answers neither probe): the cover is drawn with colored block elements, each cell chosen by error minimization for the closest possible match. Character art is inherently limited by the terminal's cell grid.
 
 Detection asks the terminal directly (a kitty graphics query plus the Primary Device Attributes reply, where sixel is attribute `4`) rather than guessing from `$TERM`. Sixel additionally needs the terminal to report its cell size in pixels; if it won't, musicTUI falls back to character art rather than misplacing the image.
+
+Run `musicTUI --caps` inside a terminal to see exactly what it reports and which renderer that selects.
+
+> **Note on Konsole.** Konsole answers the kitty graphics query affirmatively because it implements image *transmission*, but it has no support for the protocol's Unicode placeholders — the part that binds an image to a rectangle of cells. It therefore uses the sixel path, which it does implement fully.
 
 Override auto-detection with `MUSICTUI_ARTWORK` when launching:
 
