@@ -29,8 +29,12 @@ func TestSixelEncodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sixelEncode: %v", err)
 	}
-	if !strings.HasPrefix(payload, "\x1bP") {
-		t.Fatalf("payload is not a DCS sequence: %.8q", payload)
+	// P2=1. Sixel paints in bands of 6 pixel rows; when the height isn't a
+	// multiple of 6 the final band still covers all six, and P2=0 would fill
+	// those leftover rows with the background color — a dark stripe along the
+	// bottom of every cover. P2=1 leaves untouched pixels alone (MUS-29).
+	if !strings.HasPrefix(payload, "\x1bP0;1;8q") {
+		t.Fatalf("payload must be P2=1 (transparent), got %.10q", payload)
 	}
 	if !strings.HasSuffix(payload, "\x1b\\") {
 		t.Fatalf("payload is not ST-terminated: %.8q", payload[len(payload)-4:])

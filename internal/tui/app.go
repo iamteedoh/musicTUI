@@ -73,6 +73,10 @@ type App struct {
 	// View's value receiver (App is copied each frame). See (*App).View.
 	cache *viewCache
 
+	// out serializes frames and graphics payloads onto one terminal writer.
+	// nil in tests, where the raw-write fallback is used instead.
+	out *TermWriter
+
 	// Spotify
 	auth        *sp.Auth
 	client      *sp.Client
@@ -223,10 +227,15 @@ func listenMprisCmd(srv *mpris.Server) tea.Cmd {
 // and the audio-output delay compensation were dialed in at 60 fps); the
 // per-frame cost is kept low by precomputing the visualizer's per-cell colors
 // (see miniviz rebuild) rather than styling each cell every frame.
+// SetOutput gives the app the same writer Bubble Tea renders through, so
+// graphics payloads can be sequenced against frames rather than racing them.
+// Call before handing the model to tea.NewProgram.
+func (a *App) SetOutput(w *TermWriter) { a.out = w }
+
 // writeRawCmd writes escape sequences directly to the terminal, bypassing
-// Bubble Tea's renderer. Used for kitty-graphics payloads (image transmit /
-// placement / delete): invisible control data that must not be diffed,
-// cached, or truncated the way view content is.
+// Bubble Tea's renderer. Fallback for when no TermWriter is set (tests);
+// carries the same invisible control data that must not be diffed, cached, or
+// truncated the way view content is.
 func writeRawCmd(seq string) tea.Cmd {
 	return func() tea.Msg {
 		_, _ = os.Stdout.WriteString(seq)
@@ -412,10 +421,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())
 		a.viz.Update(a.playback.IsPlaying)
-		// Flush any queued kitty-graphics escapes (image transmit/placement)
-		// straight to the terminal — control data, not view content.
+		// Hand queued graphics escapes (kitty transmit/placement, or a sixel
+		// image) to the terminal writer, which paints them directly after the
+		// next frame. Writing them from a command goroutine instead would race
+		// Bubble Tea's renderer: the payload could tear, or land before the
+		// frame that blanks its cells and be erased by it.
 		if oob := a.artwork.TakeOOB(); oob != "" {
-			return a, tea.Batch(tickCmd(), writeRawCmd(oob))
+			if a.out != nil {
+				a.out.Queue(oob)
+			} else {
+				return a, tea.Batch(tickCmd(), writeRawCmd(oob))
+			}
+		}
+		if a.out != nil {
+			// A frame identical to the last one is never written, so on a
+			// static screen a queued image would wait forever. After 100ms of
+			// no drawing, the blanks are certainly already on screen.
+			a.out.FlushStale(100 * time.Millisecond)
 		}
 		return a, tickCmd()
 

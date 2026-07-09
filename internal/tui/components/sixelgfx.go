@@ -48,6 +48,12 @@ func sixelEncode(img image.Image, pxW, pxH int) (string, error) {
 	// costs little here because the image is encoded once per track, not per
 	// frame.
 	enc.Dither = true
+	// Sixel paints in bands of six pixel rows. When the height isn't a multiple
+	// of six the last band still covers all six, and with P2=0 the terminal
+	// fills the leftover rows with the background color — a dark stripe along
+	// the bottom edge of every cover (MUS-29). P2=1 leaves untouched pixels
+	// alone instead. Every pixel of an opaque cover is still painted.
+	enc.Transparent = true
 	if err := enc.Encode(scaleToRGBA(img, pxW, pxH)); err != nil {
 		return "", err
 	}

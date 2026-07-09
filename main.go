@@ -160,7 +160,13 @@ func main() {
 
 	app := tui.NewApp(cfg, bridgePath, Version)
 
-	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// One writer for both the renderer and the out-of-band graphics payloads,
+	// so a sixel image can never interleave with — or be overwritten by — the
+	// frame that reserves its cells.
+	out := tui.NewTermWriter(os.Stdout)
+	app.SetOutput(out)
+
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(out))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
