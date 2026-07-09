@@ -2,6 +2,7 @@ package termcap
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,19 @@ func TestDetectInertWhenNotTTY(t *testing.T) {
 	}
 	if SupportsKittyGraphics() {
 		t.Fatal("SupportsKittyGraphics returned true under a non-TTY test harness")
+	}
+}
+
+// --caps prints the terminal's reply; control bytes must be escaped or the
+// escape sequences would re-execute against the terminal reading the output.
+func TestRawEscaped(t *testing.T) {
+	c := parseCaps([]byte("\x1b[6;20;10t\x1b[?62;4c"))
+	got := c.RawEscaped()
+	want := "^[[6;20;10t^[[?62;4c"
+	if got != want {
+		t.Fatalf("RawEscaped() = %q, want %q", got, want)
+	}
+	if strings.ContainsRune(got, 0x1b) {
+		t.Fatal("RawEscaped() left a raw ESC in the output")
 	}
 }

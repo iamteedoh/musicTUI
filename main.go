@@ -13,7 +13,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
+	"github.com/iamteedoh/musicTUI/internal/termcap"
 	"github.com/iamteedoh/musicTUI/internal/tui"
+	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
 //go:embed bridge-bin/*
@@ -94,13 +96,45 @@ func usage() {
 	fmt.Println("\nUsage:")
 	fmt.Println("  musicTUI                   Launch the player")
 	fmt.Println("  musicTUI --version         Print the version and exit")
+	fmt.Println("  musicTUI --caps            Report what this terminal supports and exit")
 	fmt.Println("  musicTUI --config-dir DIR  Use DIR for config, credentials and")
 	fmt.Println("                             import tokens instead of the default")
 	fmt.Println("\nPoint --config-dir at an empty directory to get a clean first run")
 	fmt.Println("(the setup wizard) without touching your real configuration. The")
 	fmt.Println("MUSICTUI_CONFIG_DIR environment variable does the same thing.")
 	fmt.Println("\nArtwork rendering can be forced with the MUSICTUI_ARTWORK")
-	fmt.Println("environment variable: kitty | blocks | braille.")
+	fmt.Println("environment variable: kitty | sixel | blocks | braille.")
+	fmt.Println("Run `musicTUI --caps` inside a terminal to see what it supports.")
+}
+
+// printCaps reports what the terminal said about itself and which artwork
+// renderer that selects. Run it inside the terminal you're diagnosing.
+func printCaps() {
+	caps := termcap.Detect()
+	style := "blocks (character art)"
+	switch components.DetectArtworkStyle(caps.Kitty, caps.Sixel) {
+	case components.StyleKitty:
+		style = "kitty graphics (real pixels)"
+	case components.StyleSixel:
+		style = "sixel graphics (real pixels)"
+	case components.StyleBraille:
+		style = "braille (character art)"
+	}
+
+	fmt.Printf("musicTUI %s — terminal capabilities\n\n", Version)
+	fmt.Printf("  TERM           %s\n", os.Getenv("TERM"))
+	fmt.Printf("  TERM_PROGRAM   %s\n", os.Getenv("TERM_PROGRAM"))
+	fmt.Printf("  kitty graphics %t\n", caps.Kitty)
+	fmt.Printf("  sixel graphics %t\n", caps.Sixel)
+	fmt.Printf("  cell size      %dx%d px\n", caps.CellW, caps.CellH)
+	fmt.Printf("  artwork        %s\n", style)
+	fmt.Printf("\n  raw reply      %s\n", caps.RawEscaped())
+
+	if caps.CellW == 0 || caps.CellH == 0 {
+		fmt.Println("\n  No usable cell size: the terminal answered neither CSI 16 t nor an")
+		fmt.Println("  exact CSI 14 t / CSI 18 t pair. Sixel is disabled — an image scaled")
+		fmt.Println("  against a guessed cell size would spill outside its panel.")
+	}
 }
 
 // parseArgs handles the lightweight CLI flags accepted before the TUI starts.
@@ -117,6 +151,13 @@ func parseArgs(args []string) (run bool) {
 
 		case arg == "--help", arg == "-h":
 			usage()
+			return false
+
+		// Terminals disagree wildly about the graphics and cell-size queries,
+		// and artwork problems are almost always a disagreement we can't see.
+		// Print exactly what this terminal answered.
+		case arg == "--caps":
+			printCaps()
 			return false
 
 		case arg == "--config-dir":

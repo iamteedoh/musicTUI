@@ -29,6 +29,27 @@ type Caps struct {
 	// tell us — in which case sixel must not be used, because an image scaled
 	// against a guessed cell size overflows or under-fills its panel.
 	CellW, CellH int
+
+	// Raw is the terminal's unparsed reply, for `musicTUI --caps`. Terminals
+	// disagree wildly about these queries, so when artwork misbehaves the reply
+	// is the only ground truth.
+	Raw string
+}
+
+// RawEscaped renders Raw with control bytes shown as ^[ etc., safe to print.
+func (c Caps) RawEscaped() string {
+	var b strings.Builder
+	for _, r := range c.Raw {
+		switch {
+		case r == 0x1b:
+			b.WriteString("^[")
+		case r < 0x20 || r == 0x7f:
+			b.WriteString("^" + string(rune('@'+r)))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // query is the full probe payload: a kitty graphics support request, three
@@ -146,6 +167,7 @@ func parseCaps(buf []byte) Caps {
 	c := Caps{
 		Kitty: parseKittyReply(buf),
 		Sixel: parseSixelReply(buf),
+		Raw:   string(buf),
 	}
 	c.CellW, c.CellH = parseCellSize(buf)
 	// A sixel image must be sized in whole pixels against a known cell; without
