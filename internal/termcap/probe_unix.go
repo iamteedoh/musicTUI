@@ -4,7 +4,6 @@ package termcap
 
 import (
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -12,10 +11,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SupportsKittyGraphics asks the terminal whether it implements the kitty
-// graphics protocol by sending a support query (a=q) followed by a Primary
-// Device Attributes request as a fence, then watching for the kitty "OK" reply
-// before the DA1 reply arrives.
+// Detect asks the terminal what it supports by writing the probe query and
+// reading the replies before the DA1 fence arrives.
 //
 // This replaces environment-variable sniffing as the authoritative signal:
 // Ghostty on Linux advertises inconsistent $TERM / $TERM_PROGRAM depending on
@@ -23,36 +20,34 @@ import (
 // block art even though the terminal fully supports pixel graphics (MUS-20).
 //
 // Safety guarantees (so this can never regress a working setup):
-//   - Only probes a real TTY — returns false when stdin/stdout are redirected
-//     (pipes, CI, tests).
+//   - Only probes a real TTY — returns zero Caps when stdin/stdout are
+//     redirected (pipes, CI, tests).
 //   - Skips multiplexers (tmux/screen), which need APC passthrough.
 //   - Never blocks past the timeout (poll(2)-bounded reads, no leaked goroutine).
 //   - Always restores the terminal.
-//   - Returns false on ANY error, so the caller falls back to env detection.
+//   - Returns zero Caps on ANY error, so the caller falls back to env detection.
 //     The probe can only upgrade a missed terminal to "supported", never the
 //     reverse.
-func SupportsKittyGraphics() bool {
+func Detect() Caps {
 	inFd := os.Stdin.Fd() // uintptr, for x/term
 	if !term.IsTerminal(inFd) || !term.IsTerminal(os.Stdout.Fd()) {
-		return false
+		return Caps{}
 	}
 	if os.Getenv("TMUX") != "" || strings.HasPrefix(os.Getenv("TERM"), "screen") {
-		return false
+		return Caps{}
 	}
 
 	old, err := term.MakeRaw(inFd)
 	if err != nil {
-		return false
+		return Caps{}
 	}
 	defer func() { _ = term.Restore(inFd, old) }()
 
-	// a=q graphics query with a 1x1 32-bit direct-transmit image, then DA1.
-	query := "\x1b_Gi=" + strconv.Itoa(queryID) + ",a=q,t=d,f=32,s=1,v=1;AAAAAA==\x1b\\\x1b[c"
 	if _, err := os.Stdout.WriteString(query); err != nil {
-		return false
+		return Caps{}
 	}
 
-	return parseKittyReply(readReply(int(inFd), 300*time.Millisecond))
+	return parseCaps(readReply(int(inFd), 300*time.Millisecond))
 }
 
 // readReply drains fd until the DA1 reply's `c` terminator arrives or the total
@@ -86,26 +81,11 @@ func readReply(fd int, total time.Duration) []byte {
 		}
 		buf = append(buf, tmp[:m]...)
 		// DA1 reply is ESC [ ? … c. Its terminating 'c' means every earlier
-		// reply (the kitty graphics OK, which the terminal sends first) is
-		// already buffered, so we can stop.
+		// reply (kitty graphics OK, the size reports) is already buffered, so
+		// we can stop.
 		if i := indexDA1Terminator(buf); i >= 0 {
 			break
 		}
 	}
 	return buf
-}
-
-// indexDA1Terminator returns the index of the DA1 reply's terminating 'c'
-// (after an ESC [ ? introducer), or -1 if not yet present.
-func indexDA1Terminator(buf []byte) int {
-	start := strings.Index(string(buf), "\x1b[?")
-	if start < 0 {
-		return -1
-	}
-	for i := start + 3; i < len(buf); i++ {
-		if buf[i] == 'c' {
-			return i
-		}
-	}
-	return -1
 }

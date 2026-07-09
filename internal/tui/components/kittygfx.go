@@ -55,6 +55,10 @@ const (
 	StyleBraille
 	// StyleKitty: the actual image via kitty-graphics Unicode placeholders.
 	StyleKitty
+	// StyleSixel: the actual image via a sixel DCS payload. Real pixels for
+	// terminals that don't implement kitty graphics — Windows Terminal,
+	// WezTerm, xterm, mintty, foot, Konsole (MUS-29).
+	StyleSixel
 )
 
 // DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
@@ -66,7 +70,7 @@ const (
 // env-var sniffing misidentifies Ghostty on Linux, which made pixel artwork
 // silently fall back to block art (MUS-20). The env heuristic below is kept
 // only as a fallback for when the probe couldn't run (e.g. not a TTY).
-func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
+func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
 	switch strings.ToLower(os.Getenv("MUSICTUI_ARTWORK")) {
 	case "blocks":
 		return StyleBlocks
@@ -74,18 +78,29 @@ func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
 		return StyleBraille
 	case "kitty", "hires":
 		return StyleKitty
+	case "sixel":
+		return StyleSixel
 	}
-	// Inside tmux the APC escapes would need passthrough wrapping; use blocks.
+	// Inside tmux the APC/DCS escapes would need passthrough wrapping; use blocks.
 	if os.Getenv("TMUX") != "" {
 		return StyleBlocks
 	}
-	// Authoritative: the terminal told us it supports kitty graphics.
-	if kittyProbe {
+	// Authoritative: the terminal told us it supports kitty graphics — but only
+	// our renderer's dialect of it counts (see kittyPlaceholders).
+	if kittyProbe && kittyPlaceholders() {
 		return StyleKitty
+	}
+	// Next best real-pixel path. Preferred over kitty's env heuristic below
+	// because it, too, came from the terminal itself rather than a guess.
+	if sixelProbe {
+		return StyleSixel
 	}
 	// Fallback heuristic when the probe couldn't run (redirected output, etc.).
 	term := os.Getenv("TERM")
 	prog := os.Getenv("TERM_PROGRAM")
+	if !kittyPlaceholders() {
+		return StyleBlocks
+	}
 	if strings.Contains(term, "kitty") || os.Getenv("KITTY_WINDOW_ID") != "" {
 		return StyleKitty
 	}
@@ -94,6 +109,27 @@ func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
 		return StyleKitty
 	}
 	return StyleBlocks
+}
+
+// kittyPlaceholders reports whether the terminal can be expected to implement
+// the Unicode-placeholder half of the kitty graphics protocol (U=1 virtual
+// placements bound to U+10EEEE cells), which renderPlaceholders requires.
+//
+// The a=q support query does NOT answer this. Konsole (≥ 25) implements kitty
+// image transmission and answers a=q with ";OK", but has no placeholder
+// support: it gives the image an ordinary placement at the cursor. The result
+// is a crisp cover painted in the wrong place, orphaned there because nothing
+// owns those cells — and duplicated on every re-placement and resize (MUS-29).
+//
+// There is no capability query for placeholders, so the only signal is the
+// terminal naming itself. Konsole exports KONSOLE_VERSION. This is a denylist
+// rather than an allowlist on purpose: env sniffing misses Ghostty on Linux,
+// which is what made MUS-20 fall back to block art in the first place.
+func kittyPlaceholders() bool {
+	if os.Getenv("KONSOLE_VERSION") != "" || os.Getenv("KONSOLE_DBUS_SESSION") != "" {
+		return false
+	}
+	return true
 }
 
 // kittyTransmit encodes img as PNG and returns the chunked APC escape

@@ -2,12 +2,18 @@ package tui
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
 	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/model"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
@@ -131,5 +137,343 @@ func TestOnboardFinalStepTypesHInsteadOfNavigatingBack(t *testing.T) {
 	app = m.(App)
 	if app.onboard.Step != 0 {
 		t.Fatalf("'h' on step 1 did not navigate back: step = %d", app.onboard.Step)
+	}
+}
+
+// stripANSI removes SGR/CSI escape sequences so a rendered frame can be
+// measured in terminal cells.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && !(s[j] >= '@' && s[j] <= '~') {
+				j++
+			}
+			i = j + 1
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// A sixel image is painted at absolute cursor coordinates, so the origin the
+// layout hands to the artwork must be exactly where the ARTWORK section's
+// content begins. Get it wrong and the cover lands on another panel — with no
+// visible symptom in any other test. Pin the hand-derived formula in app.go
+// against a real rendered frame (MUS-29).
+func TestArtworkOriginMatchesRenderedFrame(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close() // an empty config auto-opens the wizard, which owns the screen
+	app.width, app.height = 160, 48
+
+	frame := app.View()
+	if frame == "" {
+		t.Fatal("empty frame")
+	}
+	col, row := app.artwork.Origin()
+	if col <= 0 || row <= 0 {
+		t.Fatalf("layout never set an origin: (%d,%d)", col, row)
+	}
+
+	lines := strings.Split(frame, "\n")
+	dividerIdx := -1
+	for i, ln := range lines {
+		if strings.Contains(stripANSI(ln), "ARTWORK") {
+			dividerIdx = i
+			break
+		}
+	}
+	if dividerIdx < 0 {
+		t.Fatal("no ARTWORK divider in the rendered frame")
+	}
+
+	// Content starts on the line after the divider. Lines are 0-based; screen
+	// rows are 1-based.
+	if wantRow := dividerIdx + 2; row != wantRow {
+		t.Errorf("origin row = %d, but ARTWORK content starts at screen row %d", row, wantRow)
+	}
+
+	// The divider line opens with '├' at the right column's left border; the
+	// content column is the one after it.
+	divider := stripANSI(lines[dividerIdx])
+	borderIdx := strings.Index(divider, "├")
+	if borderIdx < 0 {
+		t.Fatal("ARTWORK divider has no '├' border character")
+	}
+	wantCol := len([]rune(divider[:borderIdx])) + 2
+	if col != wantCol {
+		t.Errorf("origin col = %d, but the right column's content starts at screen col %d", col, wantCol)
+	}
+}
+
+// fakeSixelArtwork puts the artwork into the sixel style with a loaded cover, so
+// View publishes a draw that repaintSixelIfClobbered can act on.
+func fakeSixelArtwork(app *App) {
+	img := image.NewRGBA(image.Rect(0, 0, 300, 300))
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 300; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 200, G: 40, B: 90, A: 255})
+		}
+	}
+	app.artwork.SetStyle(components.StyleSixel)
+	app.artwork.SetCellSize(10, 20)
+	app.artwork.LoadURL("https://example.invalid/cover.jpg")
+	app.artwork.SetFullImage(img, "https://example.invalid/cover.jpg")
+	app.artwork.SetAlbumInfo("Album", "Artist")
+}
+
+// Bubble Tea rewrites a whole line when ANY column on it changes, and
+// JoinHorizontal merges the three columns into one line. So a changing center
+// column erases the sixel pixels sharing that line — the cover appears sliced in
+// half. The image must be repainted whenever a row it occupies is rewritten, and
+// must NOT be repainted when nothing on those rows changed, or the whole payload
+// would go to the terminal 60x/second (MUS-29).
+func TestSixelRepaintsOnlyWhenItsRowsChange(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	app.SetOutput(NewTermWriter(f))
+
+	fakeSixelArtwork(&app)
+	app.artwork.SetOrigin(61, 8)
+
+	// The encode happens off the event loop, so drive it the way the app does:
+	// render once to record the geometry, encode, install, render again.
+	_ = app.artwork.View(theme.Nord(), 30, 18)
+	work, ok := app.artwork.PendingSixel()
+	if !ok {
+		t.Fatal("artwork did not request an encode")
+	}
+	payload, err := components.EncodeSixel(work)
+	if err != nil {
+		t.Fatalf("EncodeSixel: %v", err)
+	}
+	if !app.artwork.SetSixelPayload(work.URL, work.Cols, work.Rows, payload) {
+		t.Fatal("payload rejected")
+	}
+	_ = app.artwork.View(theme.Nord(), 30, 18)
+
+	seq, row, rows := app.artwork.SixelDraw()
+	if seq == "" || rows <= 0 {
+		t.Fatal("artwork did not publish a sixel draw")
+	}
+
+	// A frame tall enough to contain the cover, every line distinct.
+	frame := func(mut func([]string)) string {
+		lines := make([]string, row+rows+4)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line-%02d", i)
+		}
+		if mut != nil {
+			mut(lines)
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Each frame write flushes at most one staged payload; count bytes to see
+	// whether one was staged.
+	painted := func() bool {
+		before, _ := f.Seek(0, io.SeekCurrent)
+		_, _ = app.out.Write([]byte("<FRAME>"))
+		after, _ := f.Seek(0, io.SeekCurrent)
+		return after-before > int64(len("<FRAME>"))
+	}
+
+	app.repaintSixelIfClobbered(frame(nil))
+	if !painted() {
+		t.Fatal("cover was never painted on the first frame")
+	}
+
+	app.repaintSixelIfClobbered(frame(nil))
+	if painted() {
+		t.Fatal("cover repainted even though its rows did not change")
+	}
+
+	// A change on a line the cover does not occupy.
+	app.repaintSixelIfClobbered(frame(func(l []string) { l[0] = "TITLE CHANGED" }))
+	if painted() {
+		t.Fatal("a change outside the cover's rows forced a repaint")
+	}
+
+	// A change on a line the cover sits on: the pixels there were just erased.
+	app.repaintSixelIfClobbered(frame(func(l []string) {
+		l[0] = "TITLE CHANGED"
+		l[row-1+rows/2] = "CENTER PANEL CHANGED"
+	}))
+	if !painted() {
+		t.Fatal("cover was not repainted after its rows were rewritten")
+	}
+
+	// A modal covers the artwork: never paint over it, and forget the rows so
+	// dismissing it (which restores them byte for byte) still repaints.
+	app.modal.Active = true
+	app.repaintSixelIfClobbered(frame(nil))
+	if painted() {
+		t.Fatal("painted the cover on top of a modal")
+	}
+	app.modal.Active = false
+	app.repaintSixelIfClobbered(frame(nil))
+	if !painted() {
+		t.Fatal("cover not repainted after the modal was dismissed")
+	}
+}
+
+// Resizing moves the artwork panel, so the cover is repainted at new
+// coordinates. Konsole does not erase sixel pixels when text is written over
+// them, so the old copy stays where it was and bleeds through the tracklist.
+// Only an explicit screen erase clears it — and only sixel needs that, so
+// character-art terminals must not eat a clear-and-full-repaint on every drag
+// of the window edge (MUS-29).
+func TestResizeClearsScreenOnlyForSixel(t *testing.T) {
+	cases := []struct {
+		name      string
+		style     components.ArtworkStyle
+		wantClear bool
+	}{
+		{"sixel needs the erase", components.StyleSixel, true},
+		{"kitty binds pixels to cells", components.StyleKitty, false},
+		{"blocks are just text", components.StyleBlocks, false},
+		{"braille is just text", components.StyleBraille, false},
+	}
+	for _, c := range cases {
+		app := NewApp(config.Config{}, "", "test")
+		app.onboard.Close()
+		app.artwork.SetStyle(c.style)
+		app.cache.artRows = "seeded"
+		app.cache.art = panelMemo{key: "seeded", val: "seeded"}
+
+		m, cmd := app.Update(tea.WindowSizeMsg{Width: 160, Height: 48})
+		app = m.(App)
+
+		if app.width != 160 || app.height != 48 {
+			t.Fatalf("%s: resize was not recorded", c.name)
+		}
+		if cmd == nil {
+			if c.wantClear {
+				t.Errorf("%s: resize returned no command", c.name)
+			}
+			// Character art repaints itself; only the row cache must be dropped.
+			if app.cache.artRows != "" {
+				t.Errorf("%s: cached artwork rows survived a resize", c.name)
+			}
+			continue
+		}
+
+		// Sixel sequences the erase before the repaint. tea.Sequence yields an
+		// internal sequenceMsg carrying both, in order.
+		gotSequence := fmt.Sprintf("%T", cmd()) == "tea.sequenceMsg"
+		if gotSequence != c.wantClear {
+			t.Errorf("%s: erase-then-repaint on resize = %v, want %v", c.name, gotSequence, c.wantClear)
+		}
+
+		// The cover must NOT be un-cached before the erase runs, or it gets
+		// painted and immediately wiped. sixelRepaintMsg does that afterwards.
+		if c.wantClear {
+			if app.cache.artRows == "" && app.cache.art.key == "" {
+				t.Errorf("%s: caches were dropped before the screen was erased", c.name)
+			}
+			m2, _ := app.Update(sixelRepaintMsg{})
+			after := m2.(App)
+			if after.cache.artRows != "" || after.cache.art.key != "" {
+				t.Errorf("%s: sixelRepaintMsg did not force a repaint", c.name)
+			}
+		}
+	}
+}
+
+// Encoding a cover costs tens of milliseconds. Doing it in View froze the event
+// loop for a frame, and a resize drag — one geometry per pixel of travel —
+// jammed it solid: the artwork vanished, "Loading..." stuck, the terminal was
+// flooded with 62KB payloads. It must happen in a command instead (MUS-29).
+func TestSixelEncodeHappensOffTheEventLoop(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	app.width, app.height = 160, 48
+	fakeSixelArtwork(&app)
+
+	// A frame records the geometry the panel needs...
+	_ = app.View()
+	if _, ok := app.artwork.PendingSixel(); !ok {
+		t.Fatal("View did not request an encode")
+	}
+	// ...and View must NOT have produced a payload itself.
+	if seq, _, _ := app.artwork.SixelDraw(); seq != "" {
+		t.Fatal("View encoded the cover on the event loop")
+	}
+
+	// The tick turns that into a command.
+	m, cmd := app.Update(TickMsg{})
+	app = m.(App)
+	if !app.sixelEncoding {
+		t.Fatal("tick did not start an encode")
+	}
+	if cmd == nil {
+		t.Fatal("tick returned no command")
+	}
+
+	// Only one encode may be in flight; a second tick must not launch another.
+	m, _ = app.Update(TickMsg{})
+	app = m.(App)
+	if !app.sixelEncoding {
+		t.Fatal("encoding flag was cleared without a result")
+	}
+
+	// Deliver the payload the way the command would.
+	work, _ := app.artwork.PendingSixel()
+	payload, err := components.EncodeSixel(work)
+	if err != nil {
+		t.Fatalf("EncodeSixel: %v", err)
+	}
+	m, _ = app.Update(SixelEncodedMsg{URL: work.URL, Cols: work.Cols, Rows: work.Rows, Payload: payload})
+	app = m.(App)
+
+	if app.sixelEncoding {
+		t.Fatal("encoding flag survived the result")
+	}
+	if app.cache.artRows != "" {
+		t.Fatal("a newly encoded cover must force a repaint")
+	}
+	_ = app.View()
+	if seq, _, _ := app.artwork.SixelDraw(); seq == "" {
+		t.Fatal("cover was not published after the encode landed")
+	}
+}
+
+// A resize while a cover is encoding supersedes it. The stale payload must be
+// dropped, not painted at the old geometry.
+func TestStaleSixelPayloadIsDropped(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	app.width, app.height = 160, 48
+	fakeSixelArtwork(&app)
+	_ = app.View()
+
+	work, ok := app.artwork.PendingSixel()
+	if !ok {
+		t.Fatal("no encode requested")
+	}
+
+	// The window resizes while the encode is in flight.
+	m, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = m.(App)
+	_ = app.View()
+
+	// The in-flight result now describes a geometry nobody wants.
+	m, _ = app.Update(SixelEncodedMsg{URL: work.URL, Cols: work.Cols + 7, Rows: work.Rows + 3, Payload: "STALE"})
+	app = m.(App)
+
+	if seq, _, _ := app.artwork.SixelDraw(); strings.Contains(seq, "STALE") {
+		t.Fatal("a payload for a superseded geometry was published")
+	}
+	if _, ok := app.artwork.PendingSixel(); !ok {
+		t.Fatal("after dropping a stale payload the panel must ask again")
 	}
 }

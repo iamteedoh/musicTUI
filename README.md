@@ -417,15 +417,26 @@ The right panel shows the current track's album cover. How sharp it looks depend
 
   ![Full-resolution album artwork in Ghostty](docs/artwork_ghostty.png)
 
-- **Character art** — everywhere else (iTerm2, Warp, Konsole, Terminal.app, tmux, and any other terminal): the cover is drawn with colored block elements, each cell chosen by error minimization for the closest possible match. Character art is inherently limited by the terminal's cell grid — for the pixel-perfect version, use kitty or Ghostty.
+- **Pixel-perfect via sixel** — in terminals that speak sixel graphics: **Windows Terminal 1.22+**, WezTerm, xterm (`-ti vt340`), mintty, foot and **Konsole**. Also detected automatically, so Windows gets the real cover rather than character art.
+
+- **Character art** — everywhere else (Terminal.app, Warp, tmux, and any terminal that answers neither probe): the cover is drawn with colored block elements, each cell chosen by error minimization for the closest possible match. Character art is inherently limited by the terminal's cell grid.
+
+Detection asks the terminal directly (a kitty graphics query plus the Primary Device Attributes reply, where sixel is attribute `4`) rather than guessing from `$TERM`. Sixel additionally needs the terminal to report its cell size in pixels; if it won't, musicTUI falls back to character art rather than misplacing the image.
+
+Run `musicTUI --caps` inside a terminal to see exactly what it reports and which renderer that selects.
+
+> **Note on Konsole.** Konsole answers the kitty graphics query affirmatively because it implements image *transmission*, but it has no support for the protocol's Unicode placeholders — the part that binds an image to a rectangle of cells. It therefore uses the sixel path, which it does implement fully.
 
 Override auto-detection with `MUSICTUI_ARTWORK` when launching:
 
 | Value | Renderer |
 | --- | --- |
-| `kitty` | Force pixel graphics (if your terminal supports kitty Unicode placeholders) |
-| `blocks` | Force block-element character art (the default fallback) |
+| `kitty` | Force pixel graphics via kitty Unicode placeholders |
+| `sixel` | Force pixel graphics via sixel |
+| `blocks` | Force block-element character art (the universal fallback) |
 | `braille` | Braille-over-background character art — finer dots, more texture; some prefer it |
+
+Inside `tmux`, both pixel paths are disabled (the escapes would need passthrough wrapping) and character art is used.
 
 ---
 

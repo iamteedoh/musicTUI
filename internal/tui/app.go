@@ -73,6 +73,14 @@ type App struct {
 	// View's value receiver (App is copied each frame). See (*App).View.
 	cache *viewCache
 
+	// out serializes frames and graphics payloads onto one terminal writer.
+	// nil in tests, where the raw-write fallback is used instead.
+	out *TermWriter
+
+	// sixelEncoding guards against piling up encode commands: only one cover
+	// is ever in flight, and a resize supersedes it rather than queueing.
+	sixelEncoding bool
+
 	// Spotify
 	auth        *sp.Auth
 	client      *sp.Client
@@ -141,7 +149,12 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	// no-ops on a non-TTY, so tests and piped runs stay side-effect-free.
 	art := components.NewArtwork()
 	app.artwork = &art
-	app.artwork.SetStyle(components.DetectArtworkStyle(termcap.SupportsKittyGraphics()))
+	// One probe answers all of it: kitty graphics, sixel graphics, and the
+	// pixel size of a cell (which sixel needs in order to land on cell
+	// boundaries). Terminals that answer nothing get character art.
+	caps := termcap.Detect()
+	app.artwork.SetStyle(components.DetectArtworkStyle(caps.Kitty, caps.Sixel))
+	app.artwork.SetCellSize(caps.CellW, caps.CellH)
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
 	} else {
@@ -218,10 +231,15 @@ func listenMprisCmd(srv *mpris.Server) tea.Cmd {
 // and the audio-output delay compensation were dialed in at 60 fps); the
 // per-frame cost is kept low by precomputing the visualizer's per-cell colors
 // (see miniviz rebuild) rather than styling each cell every frame.
+// SetOutput gives the app the same writer Bubble Tea renders through, so
+// graphics payloads can be sequenced against frames rather than racing them.
+// Call before handing the model to tea.NewProgram.
+func (a *App) SetOutput(w *TermWriter) { a.out = w }
+
 // writeRawCmd writes escape sequences directly to the terminal, bypassing
-// Bubble Tea's renderer. Used for kitty-graphics payloads (image transmit /
-// placement / delete): invisible control data that must not be diffed,
-// cached, or truncated the way view content is.
+// Bubble Tea's renderer. Fallback for when no TermWriter is set (tests);
+// carries the same invisible control data that must not be diffed, cached, or
+// truncated the way view content is.
 func writeRawCmd(seq string) tea.Cmd {
 	return func() tea.Msg {
 		_, _ = os.Stdout.WriteString(seq)
@@ -403,16 +421,72 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		if a.artwork.UsesSixel() {
+			// A resize moves the artwork panel, so the cover is repainted at new
+			// coordinates. In some terminals — Konsole — writing text over sixel
+			// pixels does not erase them, so the old copy is orphaned wherever it
+			// was and shows through the tracklist. Only an explicit screen erase
+			// removes it (MUS-29).
+			//
+			// The erase must land BEFORE the cover is repainted, or we paint it
+			// and wipe it in the same breath — which is why the repaint is
+			// sequenced after the clear rather than done here.
+			return a, tea.Sequence(tea.ClearScreen, sixelRepaintCmd())
+		}
+		// A resize makes Bubble Tea repaint every line unconditionally, which
+		// the row diff can't observe. Force the cover to be painted again.
+		a.cache.artRows = ""
+		return a, nil
+
+	case sixelRepaintMsg:
+		// The screen has just been erased. Drop the panel memo and the cached
+		// rows so the next frame re-renders the artwork and paints the cover.
+		a.cache.art = panelMemo{}
+		a.cache.artRows = ""
 		return a, nil
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())
 		a.viz.Update(a.playback.IsPlaying)
-		// Flush any queued kitty-graphics escapes (image transmit/placement)
-		// straight to the terminal — control data, not view content.
+		// Hand queued graphics escapes (kitty transmit/placement, or a sixel
+		// image) to the terminal writer, which paints them directly after the
+		// next frame. Writing them from a command goroutine instead would race
+		// Bubble Tea's renderer: the payload could tear, or land before the
+		// frame that blanks its cells and be erased by it.
 		if oob := a.artwork.TakeOOB(); oob != "" {
-			return a, tea.Batch(tickCmd(), writeRawCmd(oob))
+			if a.out != nil {
+				a.out.Queue(oob)
+			} else {
+				return a, tea.Batch(tickCmd(), writeRawCmd(oob))
+			}
+		}
+		if a.out != nil {
+			// A frame identical to the last one is never written, so on a
+			// static screen a queued image would wait forever. After 100ms of
+			// no drawing, the blanks are certainly already on screen.
+			a.out.FlushStale(100 * time.Millisecond)
+		}
+		// Encoding a cover costs tens of milliseconds, so it happens in a
+		// command rather than in View. One at a time: a resize drag supersedes
+		// the pending geometry faster than we could ever encode it.
+		if !a.sixelEncoding {
+			if w, ok := a.artwork.PendingSixel(); ok {
+				a.sixelEncoding = true
+				return a, tea.Batch(tickCmd(), EncodeSixelCmd(w))
+			}
 		}
 		return a, tickCmd()
+
+	case SixelEncodedMsg:
+		a.sixelEncoding = false
+		if a.artwork.SetSixelPayload(msg.URL, msg.Cols, msg.Rows, msg.Payload) {
+			// The panel renders to the same blank cells either way, so its memo
+			// still hits and renderSixel would never run to publish the draw.
+			// Drop the memo, and the cached rows with it, so the newly encoded
+			// cover is actually painted.
+			a.cache.art = panelMemo{}
+			a.cache.artRows = ""
+		}
+		return a, nil
 
 	// Auth
 	case AuthURLMsg:
@@ -2129,6 +2203,12 @@ type viewCache struct {
 	center panelMemo
 	title  panelMemo
 	art    panelMemo
+
+	// artRows is the last frame's content of the screen rows the sixel cover
+	// occupies. Bubble Tea rewrites a whole line when any column on it changes,
+	// which erases the pixels — so when these rows differ, the image must be
+	// painted again.
+	artRows string
 }
 
 func (a App) View() string {
@@ -2426,10 +2506,22 @@ func (a App) View() string {
 		tlContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" No active queue")
 	}
 
+	// Where the ARTWORK section's content area starts on screen, 1-based. The
+	// sixel renderer paints at the cursor, so it needs absolute coordinates;
+	// every other style ignores this. Rows: title(1) + column top border(1) +
+	// tracklist(tlLines) + ARTWORK divider(1). Cols: left + center columns,
+	// then the column's own "│" border.
+	a.artwork.SetOrigin(leftW+centerW+2, tlLines+4)
+
 	// Artwork content — cached on the artwork's signature so the per-cell dot
 	// matrix isn't re-rendered every frame (the cover is static within a track;
 	// the signature changes when the art loads or the track changes).
-	artKey := tf + "|" + strconv.Itoa(rightW-2) + "x" + strconv.Itoa(artLines) + "|" + a.artwork.Signature()
+	//
+	// The modal state is part of the key because a modal painting over the
+	// artwork destroys a sixel image; dismissing it must re-render the panel so
+	// the pixels are drawn again.
+	artKey := tf + "|" + strconv.Itoa(rightW-2) + "x" + strconv.Itoa(artLines) + "|" +
+		strconv.FormatBool(a.modal.Active) + "|" + a.artwork.Signature()
 	artContent := a.cache.art.get(artKey, func() string {
 		return a.artwork.View(th, rightW-2, artLines)
 	})
@@ -2495,5 +2587,47 @@ func (a App) View() string {
 		output = components.Overlay(output, modalBox, a.width, a.height)
 	}
 
+	a.repaintSixelIfClobbered(output)
+
 	return output
+}
+
+// repaintSixelIfClobbered re-queues the cover whenever Bubble Tea is about to
+// rewrite a line the image sits on.
+//
+// The renderer diffs by whole line, and JoinHorizontal merges the three columns
+// into one. So a changing track position in the center column rewrites the full
+// line — artwork cells included — and erases the pixels on it. The rows below,
+// whose neighbours happened to be static, survive: the cover appears sliced in
+// half (MUS-29).
+//
+// Queuing here rather than from Update is deliberate: View runs immediately
+// before the renderer writes this frame, so TermWriter paints the image onto
+// cells the terminal has just blanked.
+func (a App) repaintSixelIfClobbered(frame string) {
+	if a.out == nil {
+		return
+	}
+	if a.modal.Active {
+		// A modal covers the artwork; painting over it would be wrong. Forget
+		// the rows so that dismissing it — which restores their previous
+		// content byte for byte — still counts as a change and repaints.
+		a.cache.artRows = ""
+		return
+	}
+	seq, row, rows := a.artwork.SixelDraw()
+	if seq == "" || rows <= 0 {
+		return
+	}
+	lines := strings.Split(frame, "\n")
+	lo, hi := row-1, row-1+rows
+	if lo < 0 || hi > len(lines) {
+		return // layout disagrees with the placement; don't paint blind
+	}
+	covered := strings.Join(lines[lo:hi], "\n")
+	if covered == a.cache.artRows {
+		return // those rows are unchanged, so the pixels are still intact
+	}
+	a.cache.artRows = covered
+	a.out.Queue(seq)
 }
