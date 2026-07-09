@@ -495,6 +495,15 @@ musicTUI stores its configuration at the OS user config directory:
 - **Linux**: `~/.config/musicTUI/config.toml`
 - **Windows**: `%APPDATA%\musicTUI\config.toml`
 
+Point `--config-dir` (or `MUSICTUI_CONFIG_DIR`) at another directory to use a
+separate profile. Its config, saved credentials and import tokens are all kept
+there, so aiming it at an empty directory gives you a clean first run — the
+setup wizard — without disturbing your real configuration:
+
+```bash
+musicTUI --config-dir /tmp/musictui-test
+```
+
 Here is a complete example with all available options:
 
 ```toml

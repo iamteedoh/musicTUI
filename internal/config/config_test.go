@@ -116,3 +116,63 @@ func TestConfigDirUsesOSUserConfigDir(t *testing.T) {
 		t.Fatalf("ConfigDir() = %q, want %q", got, want)
 	}
 }
+
+// --config-dir / MUSICTUI_CONFIG_DIR let a throwaway profile be pointed at a
+// temp directory, so the first-run onboarding wizard can be exercised without
+// moving the real config out of the way (MUS-23).
+func TestConfigDirOverridePrecedence(t *testing.T) {
+	t.Cleanup(func() { SetDir("") })
+
+	osDefault, err := ConfigDir()
+	if err != nil {
+		t.Fatalf("ConfigDir() with no override: %v", err)
+	}
+
+	envDir := t.TempDir()
+	t.Setenv(DirEnvVar, envDir)
+	if got, _ := ConfigDir(); got != envDir {
+		t.Fatalf("ConfigDir() = %q, want the %s value %q", got, DirEnvVar, envDir)
+	}
+
+	flagDir := t.TempDir()
+	SetDir(flagDir)
+	if got, _ := ConfigDir(); got != flagDir {
+		t.Fatalf("ConfigDir() = %q, want the --config-dir value %q (flag must beat env)", got, flagDir)
+	}
+
+	// Every path derives from the override, so credentials and import tokens
+	// stay isolated too — not just config.toml.
+	if got, _ := ConfigPath(); got != filepath.Join(flagDir, "config.toml") {
+		t.Fatalf("ConfigPath() = %q, not under the override", got)
+	}
+	if got, _ := CredentialsPath(); got != filepath.Join(flagDir, "credentials.json") {
+		t.Fatalf("CredentialsPath() = %q, not under the override", got)
+	}
+
+	SetDir("")
+	os.Unsetenv(DirEnvVar)
+	if got, _ := ConfigDir(); got != osDefault {
+		t.Fatalf("ConfigDir() = %q after clearing overrides, want %q", got, osDefault)
+	}
+}
+
+// A round-trip through the override directory must actually create it and
+// persist the value — this is the path a throwaway test profile exercises.
+func TestSaveLoadUsesOverrideDir(t *testing.T) {
+	t.Cleanup(func() { SetDir("") })
+	dir := filepath.Join(t.TempDir(), "fresh")
+	SetDir(dir)
+
+	if got := Load().Spotify.ClientID; got != "" {
+		t.Fatalf("a fresh override dir must look like a first run, got client_id %q", got)
+	}
+
+	cfg := Default()
+	cfg.Spotify.ClientID = "abc123"
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() into a non-existent override dir: %v", err)
+	}
+	if got := Load().Spotify.ClientID; got != "abc123" {
+		t.Fatalf("Load() = %q, want abc123", got)
+	}
+}

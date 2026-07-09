@@ -64,7 +64,29 @@ func Default() Config {
 	}
 }
 
+// DirEnvVar overrides the config location from the environment, mirroring
+// MUSICTUI_ARTWORK. The --config-dir flag takes precedence over it.
+const DirEnvVar = "MUSICTUI_CONFIG_DIR"
+
+// dirOverride is set by SetDir. Empty means "use the OS default".
+var dirOverride string
+
+// SetDir redirects every config path — config.toml, credentials.json and the
+// import token store — at dir. Pass "" to restore the OS default.
+//
+// This exists so a throwaway profile can be pointed at a temp directory: the
+// first-run onboarding wizard only opens when no client_id is configured, so
+// exercising it otherwise means moving the real config out of the way by hand.
+// Call before Load().
+func SetDir(dir string) { dirOverride = dir }
+
 func ConfigDir() (string, error) {
+	if dirOverride != "" {
+		return dirOverride, nil
+	}
+	if env := os.Getenv(DirEnvVar); env != "" {
+		return env, nil
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
