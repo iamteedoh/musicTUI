@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/iamteedoh/musicTUI/compare/v0.3.0...v0.3.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* detect kitty graphics by querying the terminal; add --version ([#19](https://github.com/iamteedoh/musicTUI/issues/19)) ([4a570b2](https://github.com/iamteedoh/musicTUI/commit/4a570b23beb51b18afda1d419b4c628a73ca44f7))
+* ignore Windows modifier key-downs in TUI text fields ([#21](https://github.com/iamteedoh/musicTUI/issues/21)) ([cc01eb6](https://github.com/iamteedoh/musicTUI/commit/cc01eb6c3a83a3321620b2764063b7210216c311))
+* render album artwork as real pixels in terminals without kitty graphics ([#22](https://github.com/iamteedoh/musicTUI/issues/22)) ([a211ee3](https://github.com/iamteedoh/musicTUI/commit/a211ee398b2f125d052d1b7cd8da9fd7511126d6))
+
 ## [0.3.0](https://github.com/iamteedoh/musicTUI/compare/v0.2.0...v0.3.0) (2026-07-07)
 
 
