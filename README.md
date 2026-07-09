@@ -650,8 +650,13 @@ Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app k
   sudo apt install libasound2-dev    # Debian/Ubuntu
   sudo dnf install alsa-lib-devel    # Fedora
   ```
-- **Windows only**: the Visual Studio C++ build tools, which `rustup` offers to
-  install for you (Rust's default Windows toolchain links with MSVC)
+- **Windows only**: the Visual Studio C++ build tools. Rust's default Windows
+  target links with MSVC's `link.exe`, and `rustup` does **not** install it:
+  ```powershell
+  winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  ```
+  Then open a new terminal. (Alternatively, `rustup default stable-gnu` uses a
+  toolchain that needs no Visual Studio.)
 
 ### Build Steps
 

@@ -21,8 +21,10 @@ toolchains:
 - **Rust** — stable toolchain (`rustup`)
 - **Linux only:** ALSA headers — `sudo apt-get install libasound2-dev`
   (or your distro's equivalent)
-- **Windows only:** the Visual Studio C++ build tools (`rustup` offers to
-  install them; Rust's default Windows toolchain links with MSVC)
+- **Windows only:** the Visual Studio C++ build tools. Rust's default Windows
+  target links with MSVC's `link.exe`, which `rustup` does **not** install:
+  `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`
+  (or `rustup default stable-gnu` to avoid Visual Studio entirely)
 
 ## Build & run
 

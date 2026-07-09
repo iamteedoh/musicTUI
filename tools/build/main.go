@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -96,15 +97,72 @@ func requireTool(name, why, install string) error {
 }
 
 func run(dir, name string, args ...string) error {
+	return runTee(dir, nil, name, args...)
+}
+
+// runTee streams the child's output as usual, and additionally copies stderr
+// into tee (when non-nil) so a caller can inspect it to explain a failure.
+func runTee(dir string, tee io.Writer, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if tee != nil {
+		cmd.Stderr = io.MultiWriter(os.Stderr, tee)
+	}
 	cmd.Stdin = os.Stdin
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+// msvcHint is the fix for the single most likely Windows build failure: rustup
+// installs Rust but not the C++ toolchain its default target links against.
+const msvcHint = `Rust's default Windows target (x86_64-pc-windows-msvc) links with link.exe,
+  which ships with the Visual Studio C++ build tools. rustup does not install them.
+
+  Install them, then open a NEW terminal and re-run this command:
+    winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+  Or switch Rust to the GNU toolchain, which needs no Visual Studio:
+    rustup toolchain install stable-gnu
+    rustup default stable-gnu`
+
+// rustTargetsMSVC reports whether rustc will link with link.exe. Unknown means
+// "don't block the build" — a wrong guess here must never stop a working setup.
+func rustTargetsMSVC() bool {
+	out, err := exec.Command("rustc", "-vV").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "host:") {
+			return strings.Contains(line, "msvc")
+		}
+	}
+	return false
+}
+
+// msvcAvailable reports whether the MSVC C++ toolchain can be located. rustc
+// finds it through the VS Installer's vswhere, not $PATH — except inside a
+// Developer Prompt, where link.exe is on PATH directly.
+func msvcAvailable() bool {
+	if _, err := exec.LookPath("link.exe"); err == nil {
+		return true
+	}
+	programFiles := os.Getenv("ProgramFiles(x86)")
+	if programFiles == "" {
+		programFiles = `C:\Program Files (x86)`
+	}
+	vswhere := filepath.Join(programFiles, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+	if _, err := os.Stat(vswhere); err != nil {
+		return false
+	}
+	out, err := exec.Command(vswhere, "-products", "*", "-latest",
+		"-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+		"-property", "installationPath").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // version mirrors the Makefile: v0.3.0-6-gabc1234, or -dirty when the tree has
@@ -144,9 +202,21 @@ func buildBridge() error {
 		return err
 	}
 
+	// Check before compiling, not after: the linker is the last thing cargo
+	// reaches, so without this the user waits through the whole dependency
+	// tree only to fail on `link.exe not found`.
+	if runtime.GOOS == "windows" && rustTargetsMSVC() && !msvcAvailable() {
+		return fmt.Errorf("the MSVC C++ toolchain (link.exe) was not found\n\n  %s", msvcHint)
+	}
+
 	fmt.Println("==> building player-bridge (Rust, release)")
-	if err := run("bridge", "cargo", "build", "--bin", "player-bridge", "--release"); err != nil {
-		if runtime.GOOS == "linux" {
+	var stderr bytes.Buffer
+	if err := runTee("bridge", &stderr, "cargo", "build", "--bin", "player-bridge", "--release"); err != nil {
+		out := stderr.String()
+		switch {
+		case strings.Contains(out, "link.exe") || strings.Contains(out, "msvc linker"):
+			return fmt.Errorf("%w\n\n  %s", err, msvcHint)
+		case runtime.GOOS == "linux":
 			return fmt.Errorf("%w\n  on Linux this usually means the ALSA headers are missing: sudo apt-get install libasound2-dev", err)
 		}
 		return err
