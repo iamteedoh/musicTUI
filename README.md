@@ -495,6 +495,15 @@ musicTUI stores its configuration at the OS user config directory:
 - **Linux**: `~/.config/musicTUI/config.toml`
 - **Windows**: `%APPDATA%\musicTUI\config.toml`
 
+Point `--config-dir` (or `MUSICTUI_CONFIG_DIR`) at another directory to use a
+separate profile. Its config, saved credentials and import tokens are all kept
+there, so aiming it at an empty directory gives you a clean first run — the
+setup wizard — without disturbing your real configuration:
+
+```bash
+musicTUI --config-dir /tmp/musictui-test
+```
+
 Here is a complete example with all available options:
 
 ```toml
@@ -641,29 +650,39 @@ Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app k
   sudo apt install libasound2-dev    # Debian/Ubuntu
   sudo dnf install alsa-lib-devel    # Fedora
   ```
+- **Windows only**: the Visual Studio C++ build tools. Rust's default Windows
+  target links with MSVC's `link.exe`, and `rustup` does **not** install it:
+  ```powershell
+  winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  ```
+  Then open a new terminal. (Alternatively, `rustup default stable-gnu` uses a
+  toolchain that needs no Visual Studio.)
 
 ### Build Steps
 
+Clone, then run the build. The same command works on Linux, macOS and Windows:
+
 ```bash
-# Clone the repository
 git clone https://github.com/iamteedoh/musicTUI.git
 cd musicTUI
 
-# Build both the app and the audio engine
-make build
-
-# Single binary with embedded audio engine:
-#   dist/musicTUI
-
-# (Optional) Install to ~/.local/bin/
-make install
-
-# (Optional) Clean build files
-make clean
+go run ./tools/build          # -> dist/musicTUI (audio engine embedded)
+go run ./tools/build test     # go test ./...  +  cargo test
+go run ./tools/build clean
 ```
 
-The current Makefile builds for the host platform. Release packaging and
-cross-platform archives are handled outside this Makefile.
+On Linux and macOS, `make build`, `make test` and `make clean` are equivalent
+wrappers. Windows has no `make`, so use `go run ./tools/build` directly.
+
+> **Don't use a bare `go build`.** It compiles the Go code but not the Rust
+> audio engine, so the resulting binary starts up with
+> `Warning: player-bridge not found. Audio playback disabled.` and reports
+> **No audio engine available** when you press play. `go run ./tools/build`
+> builds the bridge, embeds it, and stamps the version so `musicTUI --version`
+> names the exact commit.
+
+`make install` copies the binary to `~/.local/bin` (Unix only). Release
+packaging and cross-platform archives are handled by CI, not this script.
 
 ---
 

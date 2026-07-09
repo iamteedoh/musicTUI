@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
@@ -88,24 +89,66 @@ func extractEmbeddedBridge() string {
 	return dest
 }
 
-func main() {
-	// Lightweight CLI flags handled before the TUI starts. `--version` lets a
-	// user confirm which build they're running on macOS and Linux (MUS-20);
-	// the same string is shown in the player's title bar.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--version", "-v", "version":
+func usage() {
+	fmt.Println("musicTUI — a terminal music player for Spotify")
+	fmt.Println("\nUsage:")
+	fmt.Println("  musicTUI                   Launch the player")
+	fmt.Println("  musicTUI --version         Print the version and exit")
+	fmt.Println("  musicTUI --config-dir DIR  Use DIR for config, credentials and")
+	fmt.Println("                             import tokens instead of the default")
+	fmt.Println("\nPoint --config-dir at an empty directory to get a clean first run")
+	fmt.Println("(the setup wizard) without touching your real configuration. The")
+	fmt.Println("MUSICTUI_CONFIG_DIR environment variable does the same thing.")
+	fmt.Println("\nArtwork rendering can be forced with the MUSICTUI_ARTWORK")
+	fmt.Println("environment variable: kitty | blocks | braille.")
+}
+
+// parseArgs handles the lightweight CLI flags accepted before the TUI starts.
+// It reports whether main should carry on and launch the player.
+func parseArgs(args []string) (run bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		// `--version` lets a user confirm which build they're running (MUS-20);
+		// the same string is shown in the player's title bar.
+		case arg == "--version", arg == "-v", arg == "version":
 			fmt.Printf("musicTUI %s\n", Version)
-			return
-		case "--help", "-h":
-			fmt.Println("musicTUI — a terminal music player for Spotify")
-			fmt.Println("\nUsage:")
-			fmt.Println("  musicTUI            Launch the player")
-			fmt.Println("  musicTUI --version  Print the version and exit")
-			fmt.Println("\nArtwork rendering can be forced with the MUSICTUI_ARTWORK")
-			fmt.Println("environment variable: kitty | blocks | braille.")
-			return
+			return false
+
+		case arg == "--help", arg == "-h":
+			usage()
+			return false
+
+		case arg == "--config-dir":
+			if i+1 >= len(args) || args[i+1] == "" {
+				fmt.Fprintln(os.Stderr, "Error: --config-dir requires a directory")
+				os.Exit(2)
+			}
+			i++
+			config.SetDir(args[i])
+
+		case strings.HasPrefix(arg, "--config-dir="):
+			dir := strings.TrimPrefix(arg, "--config-dir=")
+			if dir == "" {
+				fmt.Fprintln(os.Stderr, "Error: --config-dir requires a directory")
+				os.Exit(2)
+			}
+			config.SetDir(dir)
+
+		default:
+			// Never launch on a typo: an unrecognised flag would otherwise
+			// silently fall through and write to the real config directory.
+			fmt.Fprintf(os.Stderr, "Error: unknown argument %q\n\n", arg)
+			usage()
+			os.Exit(2)
 		}
+	}
+	return true
+}
+
+func main() {
+	if !parseArgs(os.Args[1:]) {
+		return
 	}
 
 	cfg := config.Load()

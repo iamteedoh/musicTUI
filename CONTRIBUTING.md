@@ -21,25 +21,46 @@ toolchains:
 - **Rust** — stable toolchain (`rustup`)
 - **Linux only:** ALSA headers — `sudo apt-get install libasound2-dev`
   (or your distro's equivalent)
+- **Windows only:** the Visual Studio C++ build tools. Rust's default Windows
+  target links with MSVC's `link.exe`, which `rustup` does **not** install:
+  `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`
+  (or `rustup default stable-gnu` to avoid Visual Studio entirely)
 
 ## Build & run
 
-The `Makefile` builds the Rust bridge and embeds it into the Go binary:
+[`tools/build`](tools/build) builds the Rust bridge, embeds it into the Go
+binary and stamps the version. It's a Go program, so it runs the same way on
+every platform:
 
 ```sh
-make build        # -> dist/musicTUI (bridge embedded)
+go run ./tools/build          # -> dist/musicTUI[.exe] (bridge embedded)
 ./dist/musicTUI
 ```
 
-`make install` copies the binary to `~/.local/bin`.
+On Linux and macOS, `make build` / `make test` / `make clean` wrap it. Windows
+has no `make` — call `go run ./tools/build` directly.
+
+A bare `go build` is **not** enough: it skips the Rust bridge, so the binary
+prints `Warning: player-bridge not found` and reports **No audio engine
+available** at playback. Always build through `tools/build`.
 
 ## Test & lint
 
 ```sh
-make test         # go test ./...  +  cargo test (bridge)
-go test ./...     # Go tests only
-gofmt -l .        # should print nothing; run `gofmt -w .` to fix
-go vet ./...      # static checks
+go run ./tools/build test   # go test ./...  +  cargo test (bridge)
+go test ./...               # Go tests only
+gofmt -l .                  # should print nothing; run `gofmt -w .` to fix
+go vet ./...                # static checks
+```
+
+## Testing onboarding
+
+The first-run setup wizard only opens when no `client_id` is configured. Point
+`--config-dir` at an empty directory to get a clean first run without touching
+your real profile:
+
+```sh
+./dist/musicTUI --config-dir /tmp/musictui-test
 ```
 
 CI runs the same checks (build, `gofmt`, `go vet`, Go + Rust tests), a secret

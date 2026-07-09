@@ -143,3 +143,24 @@ func TestImportSetupSecretKeepReplaceAndClear(t *testing.T) {
 		t.Fatalf("after clear, blank must keep saved secret again, got %q", sSecret)
 	}
 }
+
+// Ctrl+O recovery pre-fills the saved Client ID. A config written by an
+// affected Windows build holds a U+0000 (MUS-23); reopening the wizard must
+// clean it, otherwise "enter it again" re-submits the id Spotify already
+// rejected. ClientID() strips controls as the last gate before we save.
+func TestOnboardStripsControlCharsFromSavedAndTypedClientID(t *testing.T) {
+	o := NewOnboard()
+	o.StartAtClientID("\x00abc123")
+
+	if o.ClientIDInput != "abc123" {
+		t.Fatalf("prefill = %q, want abc123 — poisoned config was not healed", o.ClientIDInput)
+	}
+	if o.CursorPos != len("abc123") {
+		t.Fatalf("CursorPos = %d, want %d", o.CursorPos, len("abc123"))
+	}
+
+	o.ClientIDInput = "\x00ab\x7fc\x1f"
+	if got := o.ClientID(); got != "abc" {
+		t.Fatalf("ClientID() = %q, want abc", got)
+	}
+}
