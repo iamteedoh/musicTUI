@@ -48,6 +48,14 @@ type Artwork struct {
 	sixelCols    int
 	sixelRows    int
 	sixelPayload string // encoded DCS for (sixelURL, sixelCols, sixelRows)
+
+	// The cursor-positioned payload and the screen rows it covers. The app
+	// redraws it whenever Bubble Tea rewrites any of those rows — which it does
+	// whole-line, so a change in the left or center column erases the pixels
+	// sharing that line.
+	drawSeq  string
+	drawRow  int
+	drawRows int
 }
 
 type rgbColor struct{ R, G, B uint8 }
@@ -141,6 +149,23 @@ func (a *Artwork) Origin() (col, row int) {
 	return a.originCol, a.originRow
 }
 
+// SixelDraw returns the cursor-positioned payload for the current cover and the
+// 1-based screen rows it covers. Empty when nothing is drawn with sixel.
+//
+// Bubble Tea's line diff rewrites a whole line whenever any column on it
+// changes, which erases pixels sharing that line — so the app repaints the
+// image whenever one of these rows is rewritten.
+func (a *Artwork) SixelDraw() (seq string, row, rows int) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.drawSeq, a.drawRow, a.drawRows
+}
+
+// clearSixelDraw forgets the placed image. Caller must hold a.mu.
+func (a *Artwork) clearSixelDraw() {
+	a.drawSeq, a.drawRow, a.drawRows = "", 0, 0
+}
+
 // TakeOOB drains the queued graphics escapes — kitty protocol payloads or a
 // cursor-positioned sixel image. The app layer writes them directly to the
 // terminal (out of band of Bubble Tea's renderer): they carry image data, not
@@ -193,6 +218,11 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// No cover on screen: drop any placed image so the app stops repainting it
+	// over the placeholder.
+	if a.loading || a.err != "" || a.img == nil {
+		a.clearSixelDraw()
+	}
 	if a.loading {
 		return cText(lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("Loading..."), width, height)
 	}
@@ -213,12 +243,15 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	var imgStr string
 	switch a.style {
 	case StyleKitty:
+		a.clearSixelDraw()
 		imgStr = a.renderPlaceholders(width, imgHeight)
 	case StyleSixel:
 		imgStr = a.renderSixel(width, imgHeight)
 	case StyleBraille:
+		a.clearSixelDraw()
 		imgStr = a.renderBraille(width, imgHeight)
 	default:
+		a.clearSixelDraw()
 		imgStr = a.renderBlocks(width, imgHeight)
 	}
 
@@ -335,6 +368,7 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 // Falls back to blocks whenever we lack something we'd otherwise have to guess:
 // the terminal's cell size, or the panel's screen position.
 func (a *Artwork) renderSixel(width, height int) string {
+	a.clearSixelDraw() // republished below; every early return leaves it cleared
 	if a.cellW <= 0 || a.cellH <= 0 || a.originCol <= 0 || a.originRow <= 0 {
 		return a.renderBlocks(width, height)
 	}
@@ -388,7 +422,11 @@ func (a *Artwork) renderSixel(width, height int) string {
 		a.sixelURL = a.imageURL
 		a.sixelCols, a.sixelRows = cellsW, cellsH
 	}
-	a.oob.WriteString(sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload))
+	// Publish the draw for the app layer, which decides when the pixels need
+	// repainting. Writing it here would be one frame too early anyway.
+	a.drawSeq = sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload)
+	a.drawRow = a.originRow + topPad
+	a.drawRows = cellsH
 
 	// Blank cells beneath the pixels. Identical every frame, so once painted
 	// Bubble Tea's line diff leaves them — and the image — alone.

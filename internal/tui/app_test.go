@@ -2,6 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -9,6 +13,7 @@ import (
 	"github.com/iamteedoh/musicTUI/internal/config"
 	"github.com/iamteedoh/musicTUI/internal/importbackend"
 	"github.com/iamteedoh/musicTUI/internal/model"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
 
@@ -201,5 +206,106 @@ func TestArtworkOriginMatchesRenderedFrame(t *testing.T) {
 	wantCol := len([]rune(divider[:borderIdx])) + 2
 	if col != wantCol {
 		t.Errorf("origin col = %d, but the right column's content starts at screen col %d", col, wantCol)
+	}
+}
+
+// fakeSixelArtwork puts the artwork into the sixel style with a loaded cover, so
+// View publishes a draw that repaintSixelIfClobbered can act on.
+func fakeSixelArtwork(app *App) {
+	img := image.NewRGBA(image.Rect(0, 0, 300, 300))
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 300; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 200, G: 40, B: 90, A: 255})
+		}
+	}
+	app.artwork.SetStyle(components.StyleSixel)
+	app.artwork.SetCellSize(10, 20)
+	app.artwork.LoadURL("https://example.invalid/cover.jpg")
+	app.artwork.SetFullImage(img, "https://example.invalid/cover.jpg")
+	app.artwork.SetAlbumInfo("Album", "Artist")
+}
+
+// Bubble Tea rewrites a whole line when ANY column on it changes, and
+// JoinHorizontal merges the three columns into one line. So a changing center
+// column erases the sixel pixels sharing that line — the cover appears sliced in
+// half. The image must be repainted whenever a row it occupies is rewritten, and
+// must NOT be repainted when nothing on those rows changed, or the whole payload
+// would go to the terminal 60x/second (MUS-29).
+func TestSixelRepaintsOnlyWhenItsRowsChange(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	app.SetOutput(NewTermWriter(f))
+
+	fakeSixelArtwork(&app)
+	app.artwork.SetOrigin(61, 8)
+	_ = app.artwork.View(theme.Nord(), 30, 18) // publishes the draw
+	seq, row, rows := app.artwork.SixelDraw()
+	if seq == "" || rows <= 0 {
+		t.Fatal("artwork did not publish a sixel draw")
+	}
+
+	// A frame tall enough to contain the cover, every line distinct.
+	frame := func(mut func([]string)) string {
+		lines := make([]string, row+rows+4)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line-%02d", i)
+		}
+		if mut != nil {
+			mut(lines)
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Each frame write flushes at most one staged payload; count bytes to see
+	// whether one was staged.
+	painted := func() bool {
+		before, _ := f.Seek(0, io.SeekCurrent)
+		_, _ = app.out.Write([]byte("<FRAME>"))
+		after, _ := f.Seek(0, io.SeekCurrent)
+		return after-before > int64(len("<FRAME>"))
+	}
+
+	app.repaintSixelIfClobbered(frame(nil))
+	if !painted() {
+		t.Fatal("cover was never painted on the first frame")
+	}
+
+	app.repaintSixelIfClobbered(frame(nil))
+	if painted() {
+		t.Fatal("cover repainted even though its rows did not change")
+	}
+
+	// A change on a line the cover does not occupy.
+	app.repaintSixelIfClobbered(frame(func(l []string) { l[0] = "TITLE CHANGED" }))
+	if painted() {
+		t.Fatal("a change outside the cover's rows forced a repaint")
+	}
+
+	// A change on a line the cover sits on: the pixels there were just erased.
+	app.repaintSixelIfClobbered(frame(func(l []string) {
+		l[0] = "TITLE CHANGED"
+		l[row-1+rows/2] = "CENTER PANEL CHANGED"
+	}))
+	if !painted() {
+		t.Fatal("cover was not repainted after its rows were rewritten")
+	}
+
+	// A modal covers the artwork: never paint over it, and forget the rows so
+	// dismissing it (which restores them byte for byte) still repaints.
+	app.modal.Active = true
+	app.repaintSixelIfClobbered(frame(nil))
+	if painted() {
+		t.Fatal("painted the cover on top of a modal")
+	}
+	app.modal.Active = false
+	app.repaintSixelIfClobbered(frame(nil))
+	if !painted() {
+		t.Fatal("cover not repainted after the modal was dismissed")
 	}
 }

@@ -417,6 +417,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		// A resize makes Bubble Tea repaint every line unconditionally, which
+		// the row diff can't observe. Force the cover to be painted again.
+		a.cache.artRows = ""
 		return a, nil
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())
@@ -2156,6 +2159,12 @@ type viewCache struct {
 	center panelMemo
 	title  panelMemo
 	art    panelMemo
+
+	// artRows is the last frame's content of the screen rows the sixel cover
+	// occupies. Bubble Tea rewrites a whole line when any column on it changes,
+	// which erases the pixels — so when these rows differ, the image must be
+	// painted again.
+	artRows string
 }
 
 func (a App) View() string {
@@ -2534,5 +2543,47 @@ func (a App) View() string {
 		output = components.Overlay(output, modalBox, a.width, a.height)
 	}
 
+	a.repaintSixelIfClobbered(output)
+
 	return output
+}
+
+// repaintSixelIfClobbered re-queues the cover whenever Bubble Tea is about to
+// rewrite a line the image sits on.
+//
+// The renderer diffs by whole line, and JoinHorizontal merges the three columns
+// into one. So a changing track position in the center column rewrites the full
+// line — artwork cells included — and erases the pixels on it. The rows below,
+// whose neighbours happened to be static, survive: the cover appears sliced in
+// half (MUS-29).
+//
+// Queuing here rather than from Update is deliberate: View runs immediately
+// before the renderer writes this frame, so TermWriter paints the image onto
+// cells the terminal has just blanked.
+func (a App) repaintSixelIfClobbered(frame string) {
+	if a.out == nil {
+		return
+	}
+	if a.modal.Active {
+		// A modal covers the artwork; painting over it would be wrong. Forget
+		// the rows so that dismissing it — which restores their previous
+		// content byte for byte — still counts as a change and repaints.
+		a.cache.artRows = ""
+		return
+	}
+	seq, row, rows := a.artwork.SixelDraw()
+	if seq == "" || rows <= 0 {
+		return
+	}
+	lines := strings.Split(frame, "\n")
+	lo, hi := row-1, row-1+rows
+	if lo < 0 || hi > len(lines) {
+		return // layout disagrees with the placement; don't paint blind
+	}
+	covered := strings.Join(lines[lo:hi], "\n")
+	if covered == a.cache.artRows {
+		return // those rows are unchanged, so the pixels are still intact
+	}
+	a.cache.artRows = covered
+	a.out.Queue(seq)
 }

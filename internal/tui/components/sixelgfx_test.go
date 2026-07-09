@@ -93,9 +93,30 @@ func TestRenderSixelFallsBackWhenGeometryUnknown(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: renderSixel did not fall back to blocks", c.name)
 		}
+		if seq, _, _ := a.SixelDraw(); seq != "" {
+			t.Errorf("%s: published a %d-byte draw despite unknown geometry", c.name, len(seq))
+		}
 		if oob := a.TakeOOB(); oob != "" {
 			t.Errorf("%s: emitted %d bytes of escapes despite unknown geometry", c.name, len(oob))
 		}
+	}
+}
+
+// A cover that is no longer on screen must not keep being repainted over the
+// "Loading..." / "♫" placeholder that replaced it.
+func TestSixelDrawClearedWhenNoCover(t *testing.T) {
+	a := newSixelArtwork(10, 20, 61, 8)
+	a.albumName, a.artist = "Album", "Artist"
+	_ = a.View(theme.Nord(), 30, 18)
+	if seq, _, _ := a.SixelDraw(); seq == "" {
+		t.Fatal("no draw published for a loaded cover")
+	}
+
+	a.img = nil
+	a.loading = true
+	_ = a.View(theme.Nord(), 30, 18)
+	if seq, row, rows := a.SixelDraw(); seq != "" || row != 0 || rows != 0 {
+		t.Fatalf("draw survived the cover going away: seq=%d row=%d rows=%d", len(seq), row, rows)
 	}
 }
 
@@ -108,15 +129,18 @@ func TestRenderSixelEmitsPositionedPayload(t *testing.T) {
 	a := newSixelArtwork(cellW, cellH, originCol, originRow)
 
 	view := a.renderSixel(30, 15)
-	oob := a.TakeOOB()
+	oob, drawRow, drawRows := a.SixelDraw()
 	if oob == "" {
-		t.Fatal("no escapes queued")
+		t.Fatal("no draw published")
 	}
 	if !strings.HasPrefix(oob, "\x1b7") || !strings.HasSuffix(oob, "\x1b8") {
 		t.Fatal("payload is not wrapped in cursor save/restore")
 	}
 	if !strings.Contains(oob, "\x1bP") {
-		t.Fatal("no DCS sixel payload in the queued escapes")
+		t.Fatal("no DCS sixel payload in the published draw")
+	}
+	if drawRow <= 0 || drawRows <= 0 {
+		t.Fatalf("draw rows not published: row=%d rows=%d", drawRow, drawRows)
 	}
 
 	// The image is centered, so derive the pad from the blank view it returned.
@@ -160,21 +184,35 @@ func TestRenderSixelEmitsPositionedPayload(t *testing.T) {
 	}
 }
 
-// A re-render means Bubble Tea is about to repaint those cells and erase the
-// image, so the payload has to be queued again — even though it is unchanged.
-func TestRenderSixelReEmitsOnEveryRender(t *testing.T) {
+// The published draw is stable across renders: the app decides when to repaint,
+// based on whether the rows it covers were rewritten.
+func TestRenderSixelPublishesStableDraw(t *testing.T) {
 	a := newSixelArtwork(10, 20, 61, 8)
 
 	a.renderSixel(30, 15)
-	first := a.TakeOOB()
+	first, row1, rows1 := a.SixelDraw()
 	if first == "" {
-		t.Fatal("first render queued nothing")
+		t.Fatal("first render published nothing")
 	}
 
 	a.renderSixel(30, 15)
-	second := a.TakeOOB()
-	if second != first {
-		t.Fatal("second render did not re-queue the identical payload")
+	second, row2, rows2 := a.SixelDraw()
+	if second != first || row1 != row2 || rows1 != rows2 {
+		t.Fatal("draw changed across identical renders")
+	}
+
+	// The rows must match the blank cells the view reserves for the image.
+	view := a.renderSixel(30, 15)
+	lines := strings.Split(view, "\n")
+	topPad := 0
+	for topPad < len(lines) && lines[topPad] == "" {
+		topPad++
+	}
+	if got := len(lines) - topPad; got != rows1 {
+		t.Fatalf("draw covers %d rows but the view blanks %d", rows1, got)
+	}
+	if _, row, _ := a.SixelDraw(); row != 8+topPad {
+		t.Fatalf("draw starts at row %d, want origin(8)+topPad(%d)", row, topPad)
 	}
 }
 
@@ -183,14 +221,17 @@ func TestRenderSixelReEmitsOnEveryRender(t *testing.T) {
 func TestSetOriginMovesTheNextPayload(t *testing.T) {
 	a := newSixelArtwork(10, 20, 61, 8)
 	a.renderSixel(30, 15)
-	before := a.TakeOOB()
+	before, _, _ := a.SixelDraw()
 
 	a.SetOrigin(71, 9)
 	a.renderSixel(30, 15)
-	after := a.TakeOOB()
+	after, afterRow, _ := a.SixelDraw()
 
 	if before == after {
 		t.Fatal("payload position did not change after SetOrigin")
+	}
+	if afterRow < 9 {
+		t.Fatalf("draw row = %d, want >= the new origin row 9", afterRow)
 	}
 	if !strings.Contains(after, "\x1b[9;") {
 		t.Fatalf("payload not repositioned to row 9: %.24q", after)
