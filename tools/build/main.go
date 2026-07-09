@@ -256,8 +256,29 @@ func build() error {
 		return err
 	}
 
-	fmt.Printf("\nBuilt: %s %s (audio engine embedded)\n", out, v)
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		abs = out
+	}
+	fmt.Printf("\nBuilt: %s %s (audio engine embedded)\n", abs, v)
+	warnStaleRootBinary(out)
 	return nil
+}
+
+// warnStaleRootBinary flags a musicTUI[.exe] left in the repo root by a bare
+// `go build`. It is gitignored, so it lurks invisibly, and running it instead
+// of dist/ reports version "dev" and "No audio engine available" — the two
+// symptoms of a build that skipped the Rust bridge.
+func warnStaleRootBinary(out string) {
+	stale := appName + exeSuffix()
+	info, err := os.Stat(stale)
+	if err != nil || info.IsDir() {
+		return
+	}
+	fmt.Printf("\nWarning: a stale %q sits in the repository root.\n", stale)
+	fmt.Println("  It came from a bare `go build`, so it has no audio engine and reports")
+	fmt.Printf("  version \"dev\". Run %s instead, or remove it with:\n", out)
+	fmt.Println("      go run ./tools/build clean")
 }
 
 func test() error {
@@ -274,16 +295,28 @@ func test() error {
 }
 
 // clean removes build output but keeps bridge-bin/.gitkeep, which //go:embed
-// needs in order to match at all on a fresh clone.
+// needs in order to match at all on a fresh clone. The root-level binaries a
+// bare `go build` leaves behind go too — they're gitignored build output, and
+// leaving them lets a stale, engine-less binary shadow dist/.
 func clean() error {
 	if err := os.RemoveAll("dist"); err != nil {
 		return err
 	}
-	for _, name := range []string{"player-bridge", "player-bridge.exe"} {
-		if err := os.Remove(filepath.Join("bridge-bin", name)); err != nil && !os.IsNotExist(err) {
+	stale := []string{
+		filepath.Join("bridge-bin", "player-bridge"),
+		filepath.Join("bridge-bin", "player-bridge.exe"),
+		appName,
+		appName + ".exe",
+	}
+	for _, path := range stale {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-	fmt.Println("Cleaned dist/ and bridge-bin/")
+	fmt.Println("Cleaned dist/, bridge-bin/ and any stale root binary")
 	return nil
 }
