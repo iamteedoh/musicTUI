@@ -31,14 +31,10 @@ jobs:
       - name: Install Linux audio deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - name: Build player-bridge (Rust)
-        working-directory: bridge
-        run: cargo build --bin player-bridge --release
-
-      - name: Embed bridge
-        run: |
-          mkdir -p bridge-bin
-          cp bridge/target/release/player-bridge bridge-bin/
+      # Build the way a contributor does, so the documented command is the one
+      # CI proves works.
+      - name: Build (tools/build — bridge + app)
+        run: go run ./tools/build
 
       - name: Check formatting (gofmt)
         run: |
@@ -62,6 +58,42 @@ jobs:
       - name: Test (Rust bridge)
         working-directory: bridge
         run: cargo test
+
+  # Windows has no make, and a bare `go build` silently drops the audio engine.
+  # Prove the documented build works from a clean clone on the platform where it
+  # is easiest to break, so it can't rot unnoticed between releases.
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+
+      - name: Build (tools/build — bridge + app)
+        run: go run ./tools/build
+
+      - name: Smoke-check the binary
+        run: |
+          .\dist\musicTUI.exe --version
+          if (-not (Test-Path .\bridge-bin\player-bridge.exe)) {
+            Write-Error "player-bridge.exe was not embedded — the Windows build would ship without audio"
+            exit 1
+          }
+
+      - name: Test (Go)
+        run: go test ./...
 
   secrets:
     name: Secret scan

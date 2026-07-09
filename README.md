@@ -650,29 +650,34 @@ Media keys only work on Linux with D-Bus. On macOS and Windows, use the in-app k
   sudo apt install libasound2-dev    # Debian/Ubuntu
   sudo dnf install alsa-lib-devel    # Fedora
   ```
+- **Windows only**: the Visual Studio C++ build tools, which `rustup` offers to
+  install for you (Rust's default Windows toolchain links with MSVC)
 
 ### Build Steps
 
+Clone, then run the build. The same command works on Linux, macOS and Windows:
+
 ```bash
-# Clone the repository
 git clone https://github.com/iamteedoh/musicTUI.git
 cd musicTUI
 
-# Build both the app and the audio engine
-make build
-
-# Single binary with embedded audio engine:
-#   dist/musicTUI
-
-# (Optional) Install to ~/.local/bin/
-make install
-
-# (Optional) Clean build files
-make clean
+go run ./tools/build          # -> dist/musicTUI (audio engine embedded)
+go run ./tools/build test     # go test ./...  +  cargo test
+go run ./tools/build clean
 ```
 
-The current Makefile builds for the host platform. Release packaging and
-cross-platform archives are handled outside this Makefile.
+On Linux and macOS, `make build`, `make test` and `make clean` are equivalent
+wrappers. Windows has no `make`, so use `go run ./tools/build` directly.
+
+> **Don't use a bare `go build`.** It compiles the Go code but not the Rust
+> audio engine, so the resulting binary starts up with
+> `Warning: player-bridge not found. Audio playback disabled.` and reports
+> **No audio engine available** when you press play. `go run ./tools/build`
+> builds the bridge, embeds it, and stamps the version so `musicTUI --version`
+> names the exact commit.
+
+`make install` copies the binary to `~/.local/bin` (Unix only). Release
+packaging and cross-platform archives are handled by CI, not this script.
 
 ---
 

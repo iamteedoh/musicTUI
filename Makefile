@@ -1,28 +1,17 @@
 APP_NAME    := musicTUI
-# Stamp a meaningful version into local builds so `musicTUI --version` (and the
-# player's title bar) show exactly which commit you're on — e.g.
-# v0.3.0-6-gabc1234, or v0.3.0-6-gabc1234-dirty with uncommitted changes.
-# Tagged release builds override this via the release workflow's -X flag.
-VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS     := -s -w -X main.Version=$(VERSION)
 DIST        := dist
-BRIDGE_BIN  := player-bridge
 
-.PHONY: build build-bridge clean install test test-go test-bridge
+# The real build lives in ./tools/build — a Go program, so it runs identically
+# on Linux, macOS and Windows (where there is no make). This Makefile is a thin
+# convenience wrapper; keep the logic there so the two can't drift.
+.PHONY: build clean install test test-go test-bridge
 
 # ── Default: build single binary with embedded bridge ────
-build: build-bridge
-	@mkdir -p bridge-bin
-	cp bridge/target/release/$(BRIDGE_BIN) bridge-bin/
-	@mkdir -p $(DIST)
-	go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP_NAME) .
-	@echo "Built: $(DIST)/$(APP_NAME) $(VERSION) (bridge embedded)"
+build:
+	go run ./tools/build
 
-# ── Build Rust player-bridge ─────────────────────────────
-build-bridge:
-	cd bridge && cargo build --bin $(BRIDGE_BIN) --release
-
-test: test-go test-bridge
+test:
+	go run ./tools/build test
 
 test-go:
 	go test ./...
@@ -37,4 +26,4 @@ install: build
 	@echo "Installed to ~/.local/bin/$(APP_NAME)"
 
 clean:
-	rm -rf $(DIST) bridge-bin/$(BRIDGE_BIN)
+	go run ./tools/build clean
