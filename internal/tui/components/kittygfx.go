@@ -55,6 +55,10 @@ const (
 	StyleBraille
 	// StyleKitty: the actual image via kitty-graphics Unicode placeholders.
 	StyleKitty
+	// StyleSixel: the actual image via a sixel DCS payload. Real pixels for
+	// terminals that don't implement kitty graphics — Windows Terminal,
+	// WezTerm, xterm, mintty, foot, Konsole (MUS-29).
+	StyleSixel
 )
 
 // DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
@@ -66,7 +70,7 @@ const (
 // env-var sniffing misidentifies Ghostty on Linux, which made pixel artwork
 // silently fall back to block art (MUS-20). The env heuristic below is kept
 // only as a fallback for when the probe couldn't run (e.g. not a TTY).
-func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
+func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
 	switch strings.ToLower(os.Getenv("MUSICTUI_ARTWORK")) {
 	case "blocks":
 		return StyleBlocks
@@ -74,14 +78,21 @@ func DetectArtworkStyle(kittyProbe bool) ArtworkStyle {
 		return StyleBraille
 	case "kitty", "hires":
 		return StyleKitty
+	case "sixel":
+		return StyleSixel
 	}
-	// Inside tmux the APC escapes would need passthrough wrapping; use blocks.
+	// Inside tmux the APC/DCS escapes would need passthrough wrapping; use blocks.
 	if os.Getenv("TMUX") != "" {
 		return StyleBlocks
 	}
 	// Authoritative: the terminal told us it supports kitty graphics.
 	if kittyProbe {
 		return StyleKitty
+	}
+	// Next best real-pixel path. Preferred over kitty's env heuristic below
+	// because it, too, came from the terminal itself rather than a guess.
+	if sixelProbe {
+		return StyleSixel
 	}
 	// Fallback heuristic when the probe couldn't run (redirected output, etc.).
 	term := os.Getenv("TERM")

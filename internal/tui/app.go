@@ -141,7 +141,12 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	// no-ops on a non-TTY, so tests and piped runs stay side-effect-free.
 	art := components.NewArtwork()
 	app.artwork = &art
-	app.artwork.SetStyle(components.DetectArtworkStyle(termcap.SupportsKittyGraphics()))
+	// One probe answers all of it: kitty graphics, sixel graphics, and the
+	// pixel size of a cell (which sixel needs in order to land on cell
+	// boundaries). Terminals that answer nothing get character art.
+	caps := termcap.Detect()
+	app.artwork.SetStyle(components.DetectArtworkStyle(caps.Kitty, caps.Sixel))
+	app.artwork.SetCellSize(caps.CellW, caps.CellH)
 	if cfg.Spotify.ClientID != "" {
 		app.auth = sp.NewAuth(cfg.Spotify.ClientID)
 	} else {
@@ -2426,10 +2431,22 @@ func (a App) View() string {
 		tlContent = lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render(" No active queue")
 	}
 
+	// Where the ARTWORK section's content area starts on screen, 1-based. The
+	// sixel renderer paints at the cursor, so it needs absolute coordinates;
+	// every other style ignores this. Rows: title(1) + column top border(1) +
+	// tracklist(tlLines) + ARTWORK divider(1). Cols: left + center columns,
+	// then the column's own "│" border.
+	a.artwork.SetOrigin(leftW+centerW+2, tlLines+4)
+
 	// Artwork content — cached on the artwork's signature so the per-cell dot
 	// matrix isn't re-rendered every frame (the cover is static within a track;
 	// the signature changes when the art loads or the track changes).
-	artKey := tf + "|" + strconv.Itoa(rightW-2) + "x" + strconv.Itoa(artLines) + "|" + a.artwork.Signature()
+	//
+	// The modal state is part of the key because a modal painting over the
+	// artwork destroys a sixel image; dismissing it must re-render the panel so
+	// the pixels are drawn again.
+	artKey := tf + "|" + strconv.Itoa(rightW-2) + "x" + strconv.Itoa(artLines) + "|" +
+		strconv.FormatBool(a.modal.Active) + "|" + a.artwork.Signature()
 	artContent := a.cache.art.get(artKey, func() string {
 		return a.artwork.View(th, rightW-2, artLines)
 	})

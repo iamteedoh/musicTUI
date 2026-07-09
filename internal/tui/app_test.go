@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -131,5 +132,74 @@ func TestOnboardFinalStepTypesHInsteadOfNavigatingBack(t *testing.T) {
 	app = m.(App)
 	if app.onboard.Step != 0 {
 		t.Fatalf("'h' on step 1 did not navigate back: step = %d", app.onboard.Step)
+	}
+}
+
+// stripANSI removes SGR/CSI escape sequences so a rendered frame can be
+// measured in terminal cells.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && !(s[j] >= '@' && s[j] <= '~') {
+				j++
+			}
+			i = j + 1
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// A sixel image is painted at absolute cursor coordinates, so the origin the
+// layout hands to the artwork must be exactly where the ARTWORK section's
+// content begins. Get it wrong and the cover lands on another panel — with no
+// visible symptom in any other test. Pin the hand-derived formula in app.go
+// against a real rendered frame (MUS-29).
+func TestArtworkOriginMatchesRenderedFrame(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close() // an empty config auto-opens the wizard, which owns the screen
+	app.width, app.height = 160, 48
+
+	frame := app.View()
+	if frame == "" {
+		t.Fatal("empty frame")
+	}
+	col, row := app.artwork.Origin()
+	if col <= 0 || row <= 0 {
+		t.Fatalf("layout never set an origin: (%d,%d)", col, row)
+	}
+
+	lines := strings.Split(frame, "\n")
+	dividerIdx := -1
+	for i, ln := range lines {
+		if strings.Contains(stripANSI(ln), "ARTWORK") {
+			dividerIdx = i
+			break
+		}
+	}
+	if dividerIdx < 0 {
+		t.Fatal("no ARTWORK divider in the rendered frame")
+	}
+
+	// Content starts on the line after the divider. Lines are 0-based; screen
+	// rows are 1-based.
+	if wantRow := dividerIdx + 2; row != wantRow {
+		t.Errorf("origin row = %d, but ARTWORK content starts at screen row %d", row, wantRow)
+	}
+
+	// The divider line opens with '├' at the right column's left border; the
+	// content column is the one after it.
+	divider := stripANSI(lines[dividerIdx])
+	borderIdx := strings.Index(divider, "├")
+	if borderIdx < 0 {
+		t.Fatal("ARTWORK divider has no '├' border character")
+	}
+	wantCol := len([]rune(divider[:borderIdx])) + 2
+	if col != wantCol {
+		t.Errorf("origin col = %d, but the right column's content starts at screen col %d", col, wantCol)
 	}
 }

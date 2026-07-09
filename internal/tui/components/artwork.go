@@ -36,6 +36,18 @@ type Artwork struct {
 	placedCols     int
 	placedRows     int
 	oob            strings.Builder
+
+	// Sixel state. Unlike kitty, a sixel image is painted at the cursor with
+	// nothing binding it to the frame, so it needs the panel's absolute screen
+	// position and the terminal's pixel-per-cell size. Zero values mean "we
+	// weren't told", and the renderer falls back to blocks rather than guess.
+	cellW, cellH int
+	originCol    int // 1-based column of the artwork content area
+	originRow    int // 1-based row of the artwork content area
+	sixelURL     string
+	sixelCols    int
+	sixelRows    int
+	sixelPayload string // encoded DCS for (sixelURL, sixelCols, sixelRows)
 }
 
 type rgbColor struct{ R, G, B uint8 }
@@ -101,10 +113,39 @@ func (a *Artwork) SetStyle(s ArtworkStyle) {
 	a.style = s
 }
 
-// TakeOOB drains the queued kitty-protocol escapes. The app layer writes
-// them directly to the terminal (out of band of Bubble Tea's renderer) —
-// they carry image data, not visible text, so they must not be diffed,
-// cached, or truncated like view content.
+// SetCellSize records the terminal's pixel-per-cell size, as reported by the
+// probe. Required by the sixel renderer to scale the cover onto whole cells.
+func (a *Artwork) SetCellSize(w, h int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cellW, a.cellH = w, h
+}
+
+// SetOrigin records where the artwork content area starts on screen, as a
+// 1-based (column, row). The sixel payload is cursor-positioned there. Call
+// from the layout, which is the only place that knows.
+//
+// No invalidation is needed on a move: the payload is re-queued on every
+// panel render, always against the current origin.
+func (a *Artwork) SetOrigin(col, row int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.originCol, a.originRow = col, row
+}
+
+// Origin returns the 1-based (column, row) last given to SetOrigin, so the
+// layout's hand-derived coordinates can be checked against a rendered frame.
+func (a *Artwork) Origin() (col, row int) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.originCol, a.originRow
+}
+
+// TakeOOB drains the queued graphics escapes — kitty protocol payloads or a
+// cursor-positioned sixel image. The app layer writes them directly to the
+// terminal (out of band of Bubble Tea's renderer): they carry image data, not
+// visible text, so they must not be diffed, cached, or truncated like view
+// content.
 func (a *Artwork) TakeOOB() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -173,6 +214,8 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 	switch a.style {
 	case StyleKitty:
 		imgStr = a.renderPlaceholders(width, imgHeight)
+	case StyleSixel:
+		imgStr = a.renderSixel(width, imgHeight)
 	case StyleBraille:
 		imgStr = a.renderBraille(width, imgHeight)
 	default:
@@ -276,6 +319,86 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 	}
 	for r := 0; r < cellsH; r++ {
 		rows = append(rows, padStr+kittyPlaceholderRow(id, r, cellsW))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderSixel paints the cover as real pixels via a sixel DCS payload, and
+// returns the blank cells the image sits on. Caller must hold a.mu.
+//
+// The payload is memoized on (image, grid size) because encoding a cover costs
+// milliseconds, but it is re-queued on EVERY call. A call means the artwork
+// panel is being re-rendered, which means Bubble Tea is about to repaint those
+// cells and wipe the pixels — so the image has to be drawn again behind it. On
+// a view-cache hit this function never runs and the pixels simply persist.
+//
+// Falls back to blocks whenever we lack something we'd otherwise have to guess:
+// the terminal's cell size, or the panel's screen position.
+func (a *Artwork) renderSixel(width, height int) string {
+	if a.cellW <= 0 || a.cellH <= 0 || a.originCol <= 0 || a.originRow <= 0 {
+		return a.renderBlocks(width, height)
+	}
+	bounds := a.img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW == 0 || srcH == 0 {
+		return ""
+	}
+	charW := width - 2
+	charH := height
+	if charW < 1 || charH < 1 {
+		return a.renderBlocks(width, height)
+	}
+
+	// Fit the cover inside the panel's true pixel box, then snap down to whole
+	// cells so the image can never bleed into a neighbouring cell.
+	boxW := charW * a.cellW
+	boxH := charH * a.cellH
+	scale := float64(srcW) / float64(boxW)
+	if s := float64(srcH) / float64(boxH); s > scale {
+		scale = s
+	}
+	cellsW := int(float64(srcW)/scale) / a.cellW
+	cellsH := int(float64(srcH)/scale) / a.cellH
+	if cellsW < 1 {
+		cellsW = 1
+	}
+	if cellsH < 1 {
+		cellsH = 1
+	}
+	pxW := cellsW * a.cellW
+	pxH := cellsH * a.cellH
+
+	leftPad := (width - cellsW) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	topPad := (height - cellsH) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	if a.sixelPayload == "" || a.sixelURL != a.imageURL ||
+		a.sixelCols != cellsW || a.sixelRows != cellsH {
+		payload, err := sixelEncode(a.img, pxW, pxH)
+		if err != nil {
+			return a.renderBlocks(width, height)
+		}
+		a.sixelPayload = payload
+		a.sixelURL = a.imageURL
+		a.sixelCols, a.sixelRows = cellsW, cellsH
+	}
+	a.oob.WriteString(sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload))
+
+	// Blank cells beneath the pixels. Identical every frame, so once painted
+	// Bubble Tea's line diff leaves them — and the image — alone.
+	rows := make([]string, 0, topPad+cellsH)
+	for i := 0; i < topPad; i++ {
+		rows = append(rows, "")
+	}
+	blank := strings.Repeat(" ", leftPad+cellsW)
+	for r := 0; r < cellsH; r++ {
+		rows = append(rows, blank)
 	}
 	return strings.Join(rows, "\n")
 }
