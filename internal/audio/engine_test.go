@@ -1,22 +1,38 @@
 package audio
 
 import (
+	"io"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-// fakeBridge writes a minimal executable that consumes stdin until EOF —
-// enough to stand in for player-bridge in lifecycle tests.
+// fakeBridgeEnv makes the test binary re-exec itself as a stand-in for
+// player-bridge. Writing a #!/bin/sh script instead would be simpler, but
+// Windows can't exec one, so the audio lifecycle tests never ran there.
+const fakeBridgeEnv = "MUSICTUI_TEST_FAKE_BRIDGE"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeBridgeEnv) == "1" {
+		// Stand in for player-bridge: consume stdin until EOF, emit nothing.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// fakeBridge returns the path to a minimal executable that consumes stdin
+// until EOF — enough to stand in for player-bridge in lifecycle tests. The
+// engine inherits our environment, so the child sees fakeBridgeEnv and takes
+// the branch in TestMain above.
 func fakeBridge(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "fake-bridge")
-	script := "#!/bin/sh\nwhile read line; do :; done\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
 	}
-	return path
+	t.Setenv(fakeBridgeEnv, "1")
+	return exe
 }
 
 // After the bridge process dies (librespot crash), the next PlayTrack must
