@@ -126,10 +126,19 @@ func parseCellSize(buf []byte) (w, h int) {
 	}
 	pxH, pxW, okPx := csiParams(buf, "4")
 	rows, cols, okCells := csiParams(buf, "8")
-	if okPx && okCells {
-		return pxW / cols, pxH / rows
+	if !okPx || !okCells {
+		return 0, 0
 	}
-	return 0, 0
+	// The division is only meaningful when the pixel size is exactly the cell
+	// grid. Some terminals answer CSI 14 t with the *window* size, padding and
+	// all, which inflates every cell by a pixel or two — enough for the image
+	// to overflow the cells reserved for it and spill across the panel. An
+	// inexact division is a tell that we're dividing the wrong rectangle, so
+	// treat the cell size as unknown and fall back to character art.
+	if pxW%cols != 0 || pxH%rows != 0 {
+		return 0, 0
+	}
+	return pxW / cols, pxH / rows
 }
 
 // parseCaps turns a raw probe reply into Caps.

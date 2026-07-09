@@ -78,6 +78,19 @@ func TestParseCellSize(t *testing.T) {
 			buf:  []byte("\x1b[4;800;400t\x1b[?62;4c"),
 			w:    0, h: 0,
 		},
+		{
+			// Terminals that answer 14t with the WINDOW size (padding included)
+			// make the division inexact. Trusting it inflates every cell and the
+			// cover spills out of its panel — seen in Konsole (MUS-29).
+			name: "inexact division is rejected, not rounded",
+			buf:  []byte("\x1b[4;806;404t\x1b[8;40;40t\x1b[?62;4c"),
+			w:    0, h: 0,
+		},
+		{
+			name: "16t still wins even when 14t/18t would be inexact",
+			buf:  []byte("\x1b[6;16;8t\x1b[4;806;404t\x1b[8;40;40t\x1b[?62;4c"),
+			w:    8, h: 16,
+		},
 		{name: "no size replies at all", buf: []byte("\x1b[?62;4c"), w: 0, h: 0},
 		{name: "zero dimensions rejected", buf: []byte("\x1b[6;0;0t"), w: 0, h: 0},
 		{name: "garbage params rejected", buf: []byte("\x1b[6;x;yt"), w: 0, h: 0},
