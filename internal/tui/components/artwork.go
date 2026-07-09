@@ -49,6 +49,12 @@ type Artwork struct {
 	sixelRows    int
 	sixelPayload string // encoded DCS for (sixelURL, sixelCols, sixelRows)
 
+	// What the panel currently needs encoded. Set by renderSixel, consumed by
+	// the app layer, which encodes off the event loop.
+	wantURL            string
+	wantCols, wantRows int
+	wantPxW, wantPxH   int
+
 	// The cursor-positioned payload and the screen rows it covers. The app
 	// redraws it whenever Bubble Tea rewrites any of those rows — which it does
 	// whole-line, so a change in the left or center column erases the pixels
@@ -156,6 +162,56 @@ func (a *Artwork) UsesSixel() bool {
 	defer a.mu.RUnlock()
 	return a.style == StyleSixel
 }
+
+// SixelWork is a cover that needs encoding for the panel's current geometry.
+type SixelWork struct {
+	Img        image.Image
+	URL        string
+	PxW, PxH   int
+	Cols, Rows int
+}
+
+// PendingSixel reports the encode the panel is waiting on, if any.
+//
+// Encoding costs tens of milliseconds — far too long for View, which runs on
+// the event loop. The app performs it in a command and returns the payload via
+// SetSixelPayload. Until then the panel shows blank cells rather than freezing
+// the app, and a resize that supersedes the request simply changes what's
+// pending (MUS-29).
+func (a *Artwork) PendingSixel() (SixelWork, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.style != StyleSixel || a.img == nil || a.wantURL == "" ||
+		a.wantCols <= 0 || a.wantRows <= 0 {
+		return SixelWork{}, false
+	}
+	if a.sixelPayload != "" && a.sixelURL == a.wantURL &&
+		a.sixelCols == a.wantCols && a.sixelRows == a.wantRows {
+		return SixelWork{}, false // already have it
+	}
+	return SixelWork{
+		Img: a.img, URL: a.wantURL,
+		PxW: a.wantPxW, PxH: a.wantPxH,
+		Cols: a.wantCols, Rows: a.wantRows,
+	}, true
+}
+
+// SetSixelPayload installs an encoded cover. A payload whose geometry no longer
+// matches what the panel wants — the window was resized while it encoded — is
+// dropped, and the next frame asks again. Reports whether it was accepted.
+func (a *Artwork) SetSixelPayload(url string, cols, rows int, payload string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if payload == "" || url != a.wantURL || cols != a.wantCols || rows != a.wantRows {
+		return false
+	}
+	a.sixelURL, a.sixelCols, a.sixelRows, a.sixelPayload = url, cols, rows, payload
+	return true
+}
+
+// EncodeSixel renders w to a sixel DCS payload. Safe to call off the event
+// loop: it touches nothing on the Artwork.
+func EncodeSixel(w SixelWork) (string, error) { return sixelEncode(w.Img, w.PxW, w.PxH) }
 
 // SixelDraw returns the cursor-positioned payload for the current cover and the
 // 1-based screen rows it covers. Empty when nothing is drawn with sixel.
@@ -420,24 +476,31 @@ func (a *Artwork) renderSixel(width, height int) string {
 		topPad = 0
 	}
 
+	// Record what the panel needs. Encoding a cover costs ~40ms, and View runs
+	// on Bubble Tea's event loop — doing it here froze the whole app for a
+	// frame, and a resize drag (one geometry per pixel of travel) jammed the
+	// loop solid. The app layer encodes asynchronously and hands the payload
+	// back via SetSixelPayload (MUS-29).
+	a.wantURL, a.wantCols, a.wantRows = a.imageURL, cellsW, cellsH
+	a.wantPxW, a.wantPxH = pxW, pxH
+
 	if a.sixelPayload == "" || a.sixelURL != a.imageURL ||
 		a.sixelCols != cellsW || a.sixelRows != cellsH {
-		payload, err := sixelEncode(a.img, pxW, pxH)
-		if err != nil {
-			return a.renderBlocks(width, height)
-		}
-		a.sixelPayload = payload
-		a.sixelURL = a.imageURL
-		a.sixelCols, a.sixelRows = cellsW, cellsH
+		return blankRows(topPad, leftPad, cellsW, cellsH) // not encoded yet
 	}
+
 	// Publish the draw for the app layer, which decides when the pixels need
 	// repainting. Writing it here would be one frame too early anyway.
 	a.drawSeq = sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload)
 	a.drawRow = a.originRow + topPad
 	a.drawRows = cellsH
 
-	// Blank cells beneath the pixels. Identical every frame, so once painted
-	// Bubble Tea's line diff leaves them — and the image — alone.
+	return blankRows(topPad, leftPad, cellsW, cellsH)
+}
+
+// blankRows are the cells beneath the pixels. Identical every frame, so once
+// painted Bubble Tea's line diff leaves them — and the image — alone.
+func blankRows(topPad, leftPad, cellsW, cellsH int) string {
 	rows := make([]string, 0, topPad+cellsH)
 	for i := 0; i < topPad; i++ {
 		rows = append(rows, "")

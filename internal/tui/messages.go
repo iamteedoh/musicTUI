@@ -635,3 +635,32 @@ func RestorePlaylistsCmd(client *sp.Client) tea.Cmd {
 		return PlaylistsRestoredMsg{Refollowed: refollowed, Recreated: recreated, Failed: failed}
 	}
 }
+
+// SixelEncodedMsg carries a cover encoded off the event loop. Encoding costs
+// tens of milliseconds; doing it in View froze the app for a frame and a resize
+// drag jammed it solid (MUS-29).
+type SixelEncodedMsg struct {
+	URL        string
+	Cols, Rows int
+	Payload    string
+}
+
+// EncodeSixelCmd encodes the pending cover in a command goroutine.
+func EncodeSixelCmd(w components.SixelWork) tea.Cmd {
+	return func() tea.Msg {
+		payload, err := components.EncodeSixel(w)
+		if err != nil {
+			return SixelEncodedMsg{URL: w.URL, Cols: w.Cols, Rows: w.Rows}
+		}
+		return SixelEncodedMsg{URL: w.URL, Cols: w.Cols, Rows: w.Rows, Payload: payload}
+	}
+}
+
+// sixelRepaintMsg asks for the cover to be painted again. It is sequenced after
+// tea.ClearScreen on resize: the erase has to reach the terminal before the
+// image, or the cover is painted and immediately wiped (MUS-29).
+type sixelRepaintMsg struct{}
+
+func sixelRepaintCmd() tea.Cmd {
+	return func() tea.Msg { return sixelRepaintMsg{} }
+}

@@ -244,7 +244,23 @@ func TestSixelRepaintsOnlyWhenItsRowsChange(t *testing.T) {
 
 	fakeSixelArtwork(&app)
 	app.artwork.SetOrigin(61, 8)
-	_ = app.artwork.View(theme.Nord(), 30, 18) // publishes the draw
+
+	// The encode happens off the event loop, so drive it the way the app does:
+	// render once to record the geometry, encode, install, render again.
+	_ = app.artwork.View(theme.Nord(), 30, 18)
+	work, ok := app.artwork.PendingSixel()
+	if !ok {
+		t.Fatal("artwork did not request an encode")
+	}
+	payload, err := components.EncodeSixel(work)
+	if err != nil {
+		t.Fatalf("EncodeSixel: %v", err)
+	}
+	if !app.artwork.SetSixelPayload(work.URL, work.Cols, work.Rows, payload) {
+		t.Fatal("payload rejected")
+	}
+	_ = app.artwork.View(theme.Nord(), 30, 18)
+
 	seq, row, rows := app.artwork.SixelDraw()
 	if seq == "" || rows <= 0 {
 		t.Fatal("artwork did not publish a sixel draw")
@@ -331,6 +347,8 @@ func TestResizeClearsScreenOnlyForSixel(t *testing.T) {
 		app := NewApp(config.Config{}, "", "test")
 		app.onboard.Close()
 		app.artwork.SetStyle(c.style)
+		app.cache.artRows = "seeded"
+		app.cache.art = panelMemo{key: "seeded", val: "seeded"}
 
 		m, cmd := app.Update(tea.WindowSizeMsg{Width: 160, Height: 48})
 		app = m.(App)
@@ -338,16 +356,124 @@ func TestResizeClearsScreenOnlyForSixel(t *testing.T) {
 		if app.width != 160 || app.height != 48 {
 			t.Fatalf("%s: resize was not recorded", c.name)
 		}
-		if app.cache.artRows != "" {
-			t.Errorf("%s: cached artwork rows survived a resize", c.name)
+		if cmd == nil {
+			if c.wantClear {
+				t.Errorf("%s: resize returned no command", c.name)
+			}
+			// Character art repaints itself; only the row cache must be dropped.
+			if app.cache.artRows != "" {
+				t.Errorf("%s: cached artwork rows survived a resize", c.name)
+			}
+			continue
 		}
 
-		gotClear := false
-		if cmd != nil {
-			gotClear = fmt.Sprintf("%T", cmd()) == "tea.clearScreenMsg"
+		// Sixel sequences the erase before the repaint. tea.Sequence yields an
+		// internal sequenceMsg carrying both, in order.
+		gotSequence := fmt.Sprintf("%T", cmd()) == "tea.sequenceMsg"
+		if gotSequence != c.wantClear {
+			t.Errorf("%s: erase-then-repaint on resize = %v, want %v", c.name, gotSequence, c.wantClear)
 		}
-		if gotClear != c.wantClear {
-			t.Errorf("%s: clear-screen on resize = %v, want %v", c.name, gotClear, c.wantClear)
+
+		// The cover must NOT be un-cached before the erase runs, or it gets
+		// painted and immediately wiped. sixelRepaintMsg does that afterwards.
+		if c.wantClear {
+			if app.cache.artRows == "" && app.cache.art.key == "" {
+				t.Errorf("%s: caches were dropped before the screen was erased", c.name)
+			}
+			m2, _ := app.Update(sixelRepaintMsg{})
+			after := m2.(App)
+			if after.cache.artRows != "" || after.cache.art.key != "" {
+				t.Errorf("%s: sixelRepaintMsg did not force a repaint", c.name)
+			}
 		}
+	}
+}
+
+// Encoding a cover costs tens of milliseconds. Doing it in View froze the event
+// loop for a frame, and a resize drag — one geometry per pixel of travel —
+// jammed it solid: the artwork vanished, "Loading..." stuck, the terminal was
+// flooded with 62KB payloads. It must happen in a command instead (MUS-29).
+func TestSixelEncodeHappensOffTheEventLoop(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	app.width, app.height = 160, 48
+	fakeSixelArtwork(&app)
+
+	// A frame records the geometry the panel needs...
+	_ = app.View()
+	if _, ok := app.artwork.PendingSixel(); !ok {
+		t.Fatal("View did not request an encode")
+	}
+	// ...and View must NOT have produced a payload itself.
+	if seq, _, _ := app.artwork.SixelDraw(); seq != "" {
+		t.Fatal("View encoded the cover on the event loop")
+	}
+
+	// The tick turns that into a command.
+	m, cmd := app.Update(TickMsg{})
+	app = m.(App)
+	if !app.sixelEncoding {
+		t.Fatal("tick did not start an encode")
+	}
+	if cmd == nil {
+		t.Fatal("tick returned no command")
+	}
+
+	// Only one encode may be in flight; a second tick must not launch another.
+	m, _ = app.Update(TickMsg{})
+	app = m.(App)
+	if !app.sixelEncoding {
+		t.Fatal("encoding flag was cleared without a result")
+	}
+
+	// Deliver the payload the way the command would.
+	work, _ := app.artwork.PendingSixel()
+	payload, err := components.EncodeSixel(work)
+	if err != nil {
+		t.Fatalf("EncodeSixel: %v", err)
+	}
+	m, _ = app.Update(SixelEncodedMsg{URL: work.URL, Cols: work.Cols, Rows: work.Rows, Payload: payload})
+	app = m.(App)
+
+	if app.sixelEncoding {
+		t.Fatal("encoding flag survived the result")
+	}
+	if app.cache.artRows != "" {
+		t.Fatal("a newly encoded cover must force a repaint")
+	}
+	_ = app.View()
+	if seq, _, _ := app.artwork.SixelDraw(); seq == "" {
+		t.Fatal("cover was not published after the encode landed")
+	}
+}
+
+// A resize while a cover is encoding supersedes it. The stale payload must be
+// dropped, not painted at the old geometry.
+func TestStaleSixelPayloadIsDropped(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	app.width, app.height = 160, 48
+	fakeSixelArtwork(&app)
+	_ = app.View()
+
+	work, ok := app.artwork.PendingSixel()
+	if !ok {
+		t.Fatal("no encode requested")
+	}
+
+	// The window resizes while the encode is in flight.
+	m, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = m.(App)
+	_ = app.View()
+
+	// The in-flight result now describes a geometry nobody wants.
+	m, _ = app.Update(SixelEncodedMsg{URL: work.URL, Cols: work.Cols + 7, Rows: work.Rows + 3, Payload: "STALE"})
+	app = m.(App)
+
+	if seq, _, _ := app.artwork.SixelDraw(); strings.Contains(seq, "STALE") {
+		t.Fatal("a payload for a superseded geometry was published")
+	}
+	if _, ok := app.artwork.PendingSixel(); !ok {
+		t.Fatal("after dropping a stale payload the panel must ask again")
 	}
 }

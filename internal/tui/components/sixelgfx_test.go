@@ -60,6 +60,24 @@ func TestSixelEncodeRoundTrip(t *testing.T) {
 	}
 }
 
+// primeSixel performs the encode the app layer normally does off the event loop,
+// so the renderer can publish a draw.
+func primeSixel(t *testing.T, a *Artwork, w, h int) {
+	t.Helper()
+	a.renderSixel(w, h) // records the geometry it needs
+	work, ok := a.PendingSixel()
+	if !ok {
+		t.Fatal("renderSixel did not request an encode")
+	}
+	payload, err := EncodeSixel(work)
+	if err != nil {
+		t.Fatalf("EncodeSixel: %v", err)
+	}
+	if !a.SetSixelPayload(work.URL, work.Cols, work.Rows, payload) {
+		t.Fatal("SetSixelPayload rejected a payload for the geometry it asked for")
+	}
+}
+
 func newSixelArtwork(cellW, cellH, originCol, originRow int) *Artwork {
 	a := &Artwork{}
 	a.style = StyleSixel
@@ -107,6 +125,8 @@ func TestRenderSixelFallsBackWhenGeometryUnknown(t *testing.T) {
 func TestSixelDrawClearedWhenNoCover(t *testing.T) {
 	a := newSixelArtwork(10, 20, 61, 8)
 	a.albumName, a.artist = "Album", "Artist"
+	_ = a.View(theme.Nord(), 30, 18) // records the geometry
+	primeSixel(t, a, 30, 15)
 	_ = a.View(theme.Nord(), 30, 18)
 	if seq, _, _ := a.SixelDraw(); seq == "" {
 		t.Fatal("no draw published for a loaded cover")
@@ -127,6 +147,7 @@ func TestRenderSixelEmitsPositionedPayload(t *testing.T) {
 	const cellW, cellH = 10, 20
 	const originCol, originRow = 61, 8
 	a := newSixelArtwork(cellW, cellH, originCol, originRow)
+	primeSixel(t, a, 30, 15)
 
 	view := a.renderSixel(30, 15)
 	oob, drawRow, drawRows := a.SixelDraw()
@@ -188,6 +209,7 @@ func TestRenderSixelEmitsPositionedPayload(t *testing.T) {
 // based on whether the rows it covers were rewritten.
 func TestRenderSixelPublishesStableDraw(t *testing.T) {
 	a := newSixelArtwork(10, 20, 61, 8)
+	primeSixel(t, a, 30, 15)
 
 	a.renderSixel(30, 15)
 	first, row1, rows1 := a.SixelDraw()
@@ -220,6 +242,7 @@ func TestRenderSixelPublishesStableDraw(t *testing.T) {
 // otherwise the cover stays where the panel used to be.
 func TestSetOriginMovesTheNextPayload(t *testing.T) {
 	a := newSixelArtwork(10, 20, 61, 8)
+	primeSixel(t, a, 30, 15)
 	a.renderSixel(30, 15)
 	before, _, _ := a.SixelDraw()
 

@@ -77,6 +77,10 @@ type App struct {
 	// nil in tests, where the raw-write fallback is used instead.
 	out *TermWriter
 
+	// sixelEncoding guards against piling up encode commands: only one cover
+	// is ever in flight, and a resize supersedes it rather than queueing.
+	sixelEncoding bool
+
 	// Spotify
 	auth        *sp.Auth
 	client      *sp.Client
@@ -417,18 +421,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
-		// A resize makes Bubble Tea repaint every line unconditionally, which
-		// the row diff can't observe. Force the cover to be painted again.
-		a.cache.artRows = ""
 		if a.artwork.UsesSixel() {
 			// A resize moves the artwork panel, so the cover is repainted at new
 			// coordinates. In some terminals — Konsole — writing text over sixel
 			// pixels does not erase them, so the old copy is orphaned wherever it
 			// was and shows through the tracklist. Only an explicit screen erase
-			// removes it. Normal frames don't need this: the image is redrawn in
-			// exactly the same place, covering itself (MUS-29).
-			return a, tea.ClearScreen
+			// removes it (MUS-29).
+			//
+			// The erase must land BEFORE the cover is repainted, or we paint it
+			// and wipe it in the same breath — which is why the repaint is
+			// sequenced after the clear rather than done here.
+			return a, tea.Sequence(tea.ClearScreen, sixelRepaintCmd())
 		}
+		// A resize makes Bubble Tea repaint every line unconditionally, which
+		// the row diff can't observe. Force the cover to be painted again.
+		a.cache.artRows = ""
+		return a, nil
+
+	case sixelRepaintMsg:
+		// The screen has just been erased. Drop the panel memo and the cached
+		// rows so the next frame re-renders the artwork and paints the cover.
+		a.cache.art = panelMemo{}
+		a.cache.artRows = ""
 		return a, nil
 	case TickMsg:
 		a.viz.SetPosition(a.playback.Position.Milliseconds())
@@ -451,7 +465,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// no drawing, the blanks are certainly already on screen.
 			a.out.FlushStale(100 * time.Millisecond)
 		}
+		// Encoding a cover costs tens of milliseconds, so it happens in a
+		// command rather than in View. One at a time: a resize drag supersedes
+		// the pending geometry faster than we could ever encode it.
+		if !a.sixelEncoding {
+			if w, ok := a.artwork.PendingSixel(); ok {
+				a.sixelEncoding = true
+				return a, tea.Batch(tickCmd(), EncodeSixelCmd(w))
+			}
+		}
 		return a, tickCmd()
+
+	case SixelEncodedMsg:
+		a.sixelEncoding = false
+		if a.artwork.SetSixelPayload(msg.URL, msg.Cols, msg.Rows, msg.Payload) {
+			// The panel renders to the same blank cells either way, so its memo
+			// still hits and renderSixel would never run to publish the draw.
+			// Drop the memo, and the cached rows with it, so the newly encoded
+			// cover is actually painted.
+			a.cache.art = panelMemo{}
+			a.cache.artRows = ""
+		}
+		return a, nil
 
 	// Auth
 	case AuthURLMsg:
