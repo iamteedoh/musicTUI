@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/iamteedoh/musicTUI/internal/audio"
@@ -25,7 +26,7 @@ import (
 // loudest bars near full height. Constants/formulas are ported from
 // cava's cavacore.c (cava_execute).
 const (
-	vizFramerate   = 60.0    // matches the app tick rate; CAVA's framerate_mod keeps response real-time-correct
+	vizFramerate   = 60.0    // nominal tick rate — only the first frame's dt fallback; real dt is measured per frame
 	vizLowCutoffHz = 20.0    // CAVA lower_cutoff_freq (Kurve: 20)
 	vizHiCutoffHz  = 10000.0 // CAVA higher_cutoff_freq (Kurve: 10000)
 	vizNyquistHz   = 44100.0 / 2.0
@@ -53,6 +54,17 @@ const (
 	vizLightBase  = 0.30  // glow brightness at the base of a bar
 	vizLightRange = 0.32  // extra brightness toward the top
 	vizHueSpan    = 300.0 // hue sweep across the width (red→…→magenta)
+
+	// Peak-hold caps (classic CAVA look): a bright dot rides the top of each
+	// bar, holds briefly at the local maximum, then falls with gravity —
+	// making transients readable after the bar itself has dropped (MUS-16).
+	// The timings are tuned to clear within ~one beat at typical tempos
+	// (hold + full-height drop ≈ 0.6s ≈ a 100 BPM beat) so stale caps never
+	// hang around into the next beat and read as off-tempo. Disable entirely
+	// with MUSICTUI_VIZ_CAPS=0.
+	vizCapHoldSec = 0.12 // seconds a cap holds at its peak before falling
+	vizCapAccel   = 8.0  // fall acceleration in bar-heights/s² (full drop ≈ 0.5s)
+	vizCapLight   = 0.72 // caps render brighter than any bar row
 )
 
 type MiniVisualizer struct {
@@ -67,6 +79,12 @@ type MiniVisualizer struct {
 	prevOut []float64 // previous frame's output, pre-integral (prev_cava_out)
 	srcLo   []int     // log-freq → source-bin mapping (low index)
 	srcFrac []float64 // … and interpolation fraction
+
+	// Peak-hold cap display state (drawn-height scale, i.e. post-peakGain).
+	capPos  []float64 // held maximum each cap sits at
+	capHold []float64 // seconds left before the cap starts falling
+	capVel  []float64 // current fall speed (bar-heights/s), reset on a new peak
+	capsOff bool      // MUSICTUI_VIZ_CAPS=0 disables cap rendering
 
 	sens     float64 // auto-sensitivity multiplier (cava sens)
 	sensInit bool    // fast initial gain ramp (cava sens_init)
@@ -83,6 +101,7 @@ type MiniVisualizer struct {
 	// the shared reset suffix. Built once per resize so the hot render loop is
 	// just string concatenation — no per-cell lipgloss/termenv work each frame.
 	prefixTable [][]string
+	capPrefix   []string // brighter per-column color for peak-hold caps
 	resetSuffix string
 
 	bpm    int
@@ -90,6 +109,13 @@ type MiniVisualizer struct {
 	cached string
 	lastW  int
 	lastH  int
+
+	// Real frame timing. View runs once per Bubble Tea message, not on a
+	// fixed 60fps clock — the CAVA coefficients are recomputed each frame
+	// from the measured dt so the motion stays real-time-correct (on tempo)
+	// no matter how fast or slow frames actually arrive.
+	clock     func() time.Time // injectable for tests; time.Now in production
+	lastFrame time.Time
 }
 
 // NewMiniVisualizer returns a pointer because the App holds it across
@@ -121,6 +147,11 @@ func NewMiniVisualizer() *MiniVisualizer {
 	}
 
 	framerateMod := 66.0 / vizFramerate
+	capsOff := false
+	switch strings.TrimSpace(os.Getenv("MUSICTUI_VIZ_CAPS")) {
+	case "0", "off", "false":
+		capsOff = true
+	}
 	return &MiniVisualizer{
 		sens:           1.0,
 		sensInit:       true,
@@ -130,6 +161,8 @@ func NewMiniVisualizer() *MiniVisualizer {
 		integralCoef:   nr / math.Pow(framerateMod, 0.1),
 		dynRangeCoef:   dr / 20.0,
 		peakGain:       gain,
+		capsOff:        capsOff,
+		clock:          time.Now,
 	}
 }
 
@@ -166,6 +199,33 @@ func (v *MiniVisualizer) View(th theme.Theme, width, height int) string {
 		v.rebuild(cells, height, numBars)
 	}
 
+	// ── Measure the real frame time and refresh the CAVA coefficients ──
+	// View runs once per Bubble Tea message, so the actual cadence is NOT a
+	// steady 60fps. With fixed coefficients every filter time-constant
+	// stretches or shrinks with the message rate, and the motion audibly
+	// drifts off the music's tempo (MUS-16 rework). Deriving them from the
+	// measured dt keeps gravity/integral/autosens real-time-correct.
+	dt := 1.0 / vizFramerate
+	now := v.clock()
+	if !v.lastFrame.IsZero() {
+		dt = now.Sub(v.lastFrame).Seconds()
+	}
+	v.lastFrame = now
+	// Clamp: burst renders (several messages in one instant) must not freeze
+	// the filters, and a long stall (view hidden, app suspended) must not
+	// catapult them.
+	if dt < 1.0/240.0 {
+		dt = 1.0 / 240.0
+	} else if dt > 1.0/15.0 {
+		dt = 1.0 / 15.0
+	}
+	v.framerateMod = 66.0 * dt // cava's framerate_mod = 66/fps
+	v.gravityMod = math.Pow(v.framerateMod, 2.5) * 2.0 / v.noiseReduction
+	v.integralCoef = v.noiseReduction / math.Pow(v.framerateMod, 0.1)
+	if v.integralCoef > 0.99 { // a leaky integral must actually leak
+		v.integralCoef = 0.99
+	}
+
 	// ── Advance CAVA's per-bar smoothing from the latest spectrum frame ──
 	if v.spectrum != nil && v.isPlaying {
 		v.step(v.spectrum.Read(), numBars)
@@ -175,6 +235,27 @@ func (v *MiniVisualizer) View(th theme.Theme, width, height int) string {
 			v.mem[i] *= 0.85
 			v.prevOut[i] *= 0.85
 			v.peak[i] *= 0.85
+		}
+	}
+
+	// ── Advance the peak-hold caps toward this frame's drawn heights ──
+	// (runs when paused too, so caps decay with the bars instead of freezing)
+	for n := 0; n < numBars; n++ {
+		h := clamp01(v.heights[n] * v.peakGain)
+		switch {
+		case h >= v.capPos[n]:
+			v.capPos[n] = h
+			v.capHold[n] = vizCapHoldSec
+			v.capVel[n] = 0
+		case v.capHold[n] > 0:
+			v.capHold[n] -= dt
+		default:
+			v.capVel[n] += vizCapAccel * dt // accelerate like the bars' gravity
+			v.capPos[n] -= v.capVel[n] * dt
+			if v.capPos[n] < h {
+				v.capPos[n] = h
+				v.capVel[n] = 0
+			}
 		}
 	}
 
@@ -188,21 +269,40 @@ func (v *MiniVisualizer) View(th theme.Theme, width, height int) string {
 			leftDots := int(clamp01(v.heights[2*c]*v.peakGain) * float64(totalDotRows))
 			rightDots := int(clamp01(v.heights[2*c+1]*v.peakGain) * float64(totalDotRows))
 
-			mask := 0
+			// Cap dot index (from the bottom). Sits one dot above the bar it
+			// belongs to; hidden at the baseline so silence stays blank.
+			leftCap, rightCap := -1, -1
+			if !v.capsOff {
+				leftCap = int(v.capPos[2*c] * float64(totalDotRows))
+				rightCap = int(v.capPos[2*c+1] * float64(totalDotRows))
+			}
+
+			barMask, capMask := 0, 0
 			for dy := 0; dy < 4; dy++ {
 				dotFromBottom := totalDotRows - (row*4 + dy) - 1
 				if dotFromBottom < leftDots {
-					mask |= leftDotBits[dy]
+					barMask |= leftDotBits[dy]
+				} else if dotFromBottom == leftCap && leftCap >= 1 {
+					capMask |= leftDotBits[dy]
 				}
 				if dotFromBottom < rightDots {
-					mask |= rightDotBits[dy]
+					barMask |= rightDotBits[dy]
+				} else if dotFromBottom == rightCap && rightCap >= 1 {
+					capMask |= rightDotBits[dy]
 				}
 			}
+			mask := barMask | capMask
 			if mask == 0 {
 				line.WriteByte(' ')
 				continue
 			}
-			line.WriteString(v.prefixTable[c][row])
+			// One foreground color per cell: bar pixels win; a lone cap gets
+			// the brighter cap color so it reads as a marker, not a stray bar.
+			if barMask != 0 {
+				line.WriteString(v.prefixTable[c][row])
+			} else {
+				line.WriteString(v.capPrefix[c])
+			}
 			line.WriteRune(rune(0x2800 + mask))
 		}
 		line.WriteString(v.resetSuffix) // restore default color at line end
@@ -287,6 +387,9 @@ func (v *MiniVisualizer) rebuild(cells, height, numBars int) {
 	v.prevOut = make([]float64, numBars)
 	v.srcLo = make([]int, numBars)
 	v.srcFrac = make([]float64, numBars)
+	v.capPos = make([]float64, numBars)
+	v.capHold = make([]float64, numBars)
+	v.capVel = make([]float64, numBars)
 
 	// Log frequency distribution between the cutoffs (CAVA-style), mapped back
 	// to the bridge's source bins. The bridge spaces its NumBins quadratically
@@ -317,9 +420,16 @@ func (v *MiniVisualizer) rebuild(cells, height, numBars int) {
 	// reused every frame — re-styling per cell was the main render cost.
 	const sentinel = "M" // never appears inside an SGR sequence (which ends in 'm')
 	v.prefixTable = make([][]string, cells)
+	v.capPrefix = make([]string, cells)
 	v.resetSuffix = ""
 	for c := 0; c < cells; c++ {
 		hue := (float64(c) + 0.5) / float64(cells) * vizHueSpan
+		capSample := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(hslHex(hue, vizSat, vizCapLight))).
+			Render(sentinel)
+		if i := strings.Index(capSample, sentinel); i >= 0 {
+			v.capPrefix[c] = capSample[:i]
+		}
 		v.prefixTable[c] = make([]string, height)
 		for row := 0; row < height; row++ {
 			vpos := (float64(height-row) - 0.5) / float64(height) // 0 bottom .. 1 top
