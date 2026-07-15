@@ -65,7 +65,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
 ## Features
 
 - **Spotify playback** — stream your library, search the Spotify catalog, and control playback entirely from the terminal (Premium required for audio).
-- **Real-time audio visualizer** — a CAVA-style spectrum analyzer (the engine behind the popular "Kurve" desktop widget) that's tightly synced to the **beat and tempo**, with a horizontal rainbow gradient and a live BPM readout. Tunable at runtime — see [Audio Visualizer](#audio-visualizer).
+- **Real-time audio visualizer** — a CAVA-style spectrum analyzer (the engine behind the popular "Kurve" desktop widget) that's tightly synced to the **beat and tempo**, with a horizontal rainbow gradient, falling peak-hold caps, and a live BPM readout. Tunable at runtime — see [Audio Visualizer](#audio-visualizer).
 - **Synced lyrics** — line-synced lyrics that scroll with the music, inline or full-screen.
 - **Album artwork** — the current cover rendered right in your terminal. **Pixel-perfect** in terminals that support kitty-graphics Unicode placeholders ([kitty](https://sw.kovidgoyal.net/kitty/), [Ghostty](https://ghostty.org)); high-detail character art everywhere else. See [Album Artwork](#album-artwork).
 - **Full library & playlist management** — browse, search, and create / edit / delete / reorder playlists, move tracks between them, and clean up duplicate or empty playlists.
@@ -442,7 +442,7 @@ Inside `tmux`, both pixel paths are disabled (the escapes would need passthrough
 
 ## Audio Visualizer
 
-The right panel shows a real-time audio visualizer — a spectrum analyzer modeled on [CAVA](https://github.com/karlstav/cava) (the engine behind the popular "Kurve" desktop widget). It's tightly synced to the **beat and tempo** of whatever's playing, with a horizontal rainbow gradient and a live **BPM** readout in the panel title.
+The right panel shows a real-time audio visualizer — a spectrum analyzer modeled on [CAVA](https://github.com/karlstav/cava) (the engine behind the popular "Kurve" desktop widget). It's tightly synced to the **beat and tempo** of whatever's playing, with a horizontal rainbow gradient, falling **peak-hold caps** on every bar, and a live **BPM** readout in the panel title.
 
 It looks great out of the box, but you can fine-tune it with environment variables when you launch musicTUI — no rebuild needed:
 
@@ -452,6 +452,7 @@ It looks great out of the box, but you can fine-tune it with environment variabl
 | `MUSICTUI_VIZ_GAIN` | `2.0` | Peak height. Higher = taller bars. |
 | `MUSICTUI_VIZ_DYNRANGE_DB` | `60` | Contrast. Higher = spikier (low floor); lower = fuller/more body. |
 | `MUSICTUI_VIZ_DELAY_MS` | `260` | Sync offset (ms) between the visuals and the audio you hear. **Increase** if the visualizer runs ahead of the beat; **decrease** if it lags behind. |
+| `MUSICTUI_VIZ_CAPS` | `1` | Peak-hold caps (the bright falling dots above the bars). Set to `0` to turn them off. |
 
 Example — a taller, snappier visualizer:
 
