@@ -39,7 +39,15 @@ func (c Config) SpotifyImportClientID() string {
 	return c.Spotify.ClientID
 }
 
+// Version is the config schema version this build writes. Bump it when an
+// older build's stored value has to be interpreted differently, and add the
+// step to migrate().
+//
+//	1 — the theme picker and auto-detection (MUS-32).
+const Version = 1
+
 type Config struct {
+	Version         int           `toml:"config_version"`
 	Theme           string        `toml:"theme"`
 	TickRateMs      int           `toml:"tick_rate_ms"`
 	FrameRate       int           `toml:"frame_rate"`
@@ -51,7 +59,11 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Theme:      "nord",
+		Version: Version,
+		// "auto" matches the palette to the terminal's own background —
+		// dark-only theming made the app illegible on light terminals
+		// (MUS-32). An explicit theme name in config.toml still wins.
+		Theme:      "auto",
 		TickRateMs: 33,
 		FrameRate:  60,
 		Volume:     75,
@@ -120,7 +132,17 @@ func Load() Config {
 	if err != nil {
 		return cfg
 	}
+	// Read the version the FILE declares, not the default's — an absent
+	// config_version means the file predates versioning and needs migrating.
+	cfg.Version = 0
 	_ = toml.Unmarshal(data, &cfg)
+	cfg = migrate(cfg)
+
+	// A config written before the theme key existed (or with it blanked)
+	// gets auto-detection, same as a fresh install.
+	if cfg.Theme == "" {
+		cfg.Theme = "auto"
+	}
 	if cfg.FrameRate <= 0 {
 		cfg.FrameRate = 60
 	}
@@ -130,6 +152,27 @@ func Load() Config {
 	if cfg.Volume < 0 || cfg.Volume > 100 {
 		cfg.Volume = 75
 	}
+	return cfg
+}
+
+// migrate brings a config written by an older build up to Version.
+func migrate(cfg Config) Config {
+	// v0 → v1: before the theme picker (MUS-32) nothing in the app could
+	// change the theme, so a stored "nord" is the old *default* rather than a
+	// decision — and Save() wrote it into every config.toml that has ever
+	// existed. Honoring it as an explicit choice would pin every current user
+	// to a dark palette and mean auto-detection never runs for exactly the
+	// people this ticket is for, so treat it as unset.
+	//
+	// This can only ever change the look for someone whose terminal reports a
+	// light or mid-tone background: on a dark terminal "auto" resolves back to
+	// Nord. A theme the user hand-edited to anything other than the old
+	// default is a real choice and is left alone, as is any "nord" written by
+	// a versioned build — by then the picker existed, so it was chosen.
+	if cfg.Version < 1 && cfg.Theme == "nord" {
+		cfg.Theme = "auto"
+	}
+	cfg.Version = Version
 	return cfg
 }
 

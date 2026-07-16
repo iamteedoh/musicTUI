@@ -104,6 +104,48 @@ func TestParseCellSize(t *testing.T) {
 	}
 }
 
+// OSC 11 answers come in several shapes; anything unparseable must yield ""
+// so auto-theming falls back to the dark default rather than acting on a
+// misread color.
+func TestParseBgReply(t *testing.T) {
+	cases := []struct {
+		name string
+		buf  []byte
+		want string
+	}{
+		{"16-bit channels, ST terminator", []byte("\x1b]11;rgb:1e1e/1e1e/2626\x1b\\\x1b[?62c"), "#1e1e26"},
+		{"8-bit channels, BEL terminator", []byte("\x1b]11;rgb:2e/34/40\a\x1b[?62c"), "#2e3440"},
+		{"single-digit channels scale up", []byte("\x1b]11;rgb:f/f/f\x1b\\"), "#ffffff"},
+		{"rgba alpha channel ignored", []byte("\x1b]11;rgba:ffff/fdfd/f6f6/ffff\x1b\\"), "#fffdf6"},
+		{"uppercase hex accepted", []byte("\x1b]11;rgb:FDFD/F6F6/E3E3\x1b\\"), "#fdf6e3"},
+		{"mixed reply order with other answers", []byte("\x1b_Gi=4211;OK\x1b\\\x1b[6;20;10t\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?62c"), "#000000"},
+		{"no OSC 11 reply at all", []byte("\x1b[6;20;10t\x1b[?62;4c"), ""},
+		{"unterminated reply", []byte("\x1b]11;rgb:1e1e/1e1e/2626"), ""},
+		{"non-rgb spec", []byte("\x1b]11;#1e1e26\x1b\\"), ""},
+		{"too few channels", []byte("\x1b]11;rgb:1e1e/1e1e\x1b\\"), ""},
+		{"garbage channels", []byte("\x1b]11;rgb:zz/aa/bb\x1b\\"), ""},
+		{"channel too wide", []byte("\x1b]11;rgb:11111/22/33\x1b\\"), ""},
+		{"empty", nil, ""},
+	}
+	for _, c := range cases {
+		if got := parseBgReply(c.buf); got != c.want {
+			t.Errorf("%s: parseBgReply(%q) = %q, want %q", c.name, c.buf, got, c.want)
+		}
+	}
+}
+
+// The full probe reply carries the background color alongside graphics
+// capabilities; a silent terminal yields an empty Bg, never a guess.
+func TestParseCapsIncludesBg(t *testing.T) {
+	c := parseCaps([]byte("\x1b_Gi=4211;OK\x1b\\\x1b[6;20;10t\x1b]11;rgb:1a1a/1b1b/2626\x1b\\\x1b[?62c"))
+	if c.Bg != "#1a1b26" {
+		t.Fatalf("Bg = %q, want #1a1b26 (full caps: %+v)", c.Bg, c)
+	}
+	if parseCaps(nil).Bg != "" {
+		t.Fatal("a silent terminal must report an empty Bg")
+	}
+}
+
 // A sixel image has to be scaled against a known cell size to land on cell
 // boundaries. If the terminal advertises sixel but won't tell us its cell size,
 // we must NOT use sixel — a guessed size overflows the panel or under-fills it.

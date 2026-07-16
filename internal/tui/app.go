@@ -33,8 +33,13 @@ import (
 )
 
 type App struct {
-	config               config.Config
-	theme                theme.Theme
+	config config.Config
+	theme  theme.Theme
+	// termBg is the terminal's own background color ("#rrggbb") from the
+	// startup probe, empty when it didn't answer. Kept so switching the
+	// Theme setting back to Auto can re-resolve against the real background
+	// without another probe round-trip.
+	termBg               string
 	width                int
 	height               int
 	focus                model.FocusMode
@@ -115,10 +120,17 @@ type App struct {
 }
 
 func NewApp(cfg config.Config, bridgePath string, version string) App {
-	th := theme.FromName(cfg.Theme)
+	// One probe answers everything we need from the terminal: kitty graphics,
+	// sixel graphics, the pixel size of a cell (which sixel needs in order to
+	// land on cell boundaries), and the background color that auto-theming
+	// matches a palette against (MUS-32). The probe no-ops on a non-TTY, so
+	// tests and piped runs stay side-effect-free.
+	caps := termcap.Detect()
+	th := theme.Resolve(cfg.Theme, caps.Bg)
 	app := App{
 		config:      cfg,
 		theme:       th,
+		termBg:      caps.Bg,
 		version:     version,
 		focus:       model.FocusSidebar,
 		view:        model.ViewHome,
@@ -145,14 +157,10 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 	// Unicode placeholders (kitty, Ghostty); error-minimized block art
 	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides). The
 	// terminal is queried directly for support (reliable across platforms,
-	// unlike env sniffing which missed Ghostty on Linux — MUS-20). The probe
-	// no-ops on a non-TTY, so tests and piped runs stay side-effect-free.
+	// unlike env sniffing which missed Ghostty on Linux — MUS-20).
+	// Terminals that answer nothing get character art.
 	art := components.NewArtwork()
 	app.artwork = &art
-	// One probe answers all of it: kitty graphics, sixel graphics, and the
-	// pixel size of a cell (which sixel needs in order to land on cell
-	// boundaries). Terminals that answer nothing get character art.
-	caps := termcap.Detect()
 	app.artwork.SetStyle(components.DetectArtworkStyle(caps.Kitty, caps.Sixel))
 	app.artwork.SetCellSize(caps.CellW, caps.CellH)
 	if cfg.Spotify.ClientID != "" {
@@ -1219,8 +1227,12 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Arrow keys for panel switching (unless typing in search)
-	if !a.isSearchInputFocused() {
+	// Arrow keys for panel switching (unless typing in search). The focused
+	// Settings panel keeps ←/→ for itself — they cycle the selected value
+	// there (MUS-32) — so panel switching skips that one case; Esc/h/Tab
+	// still leave the panel.
+	settingsOwnsKeys := a.view == model.ViewSettings && a.focus == model.FocusContent
+	if !a.isSearchInputFocused() && !settingsOwnsKeys {
 		switch msg.String() {
 		case "left":
 			switch a.focus {
@@ -1292,6 +1304,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.playback.Repeat = a.queue.Repeat
 			return a, nil
 		case "l":
+			// The focused Settings panel uses l (vim-right) to cycle the
+			// selected value; everywhere else it toggles inline lyrics.
+			if settingsOwnsKeys {
+				break
+			}
 			a.showLyrics = !a.showLyrics
 			return a, nil
 		}
@@ -1905,12 +1922,13 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.settings.Down()
 		case "k", "up":
 			a.settings.Up()
-		case "enter":
-			switch a.settings.SelectedKey() {
-			case "check_duplicates":
-				a.config.CheckDuplicates = !a.config.CheckDuplicates
-				_ = config.Save(a.config)
-			}
+		// Enter and →/l step a setting forward, ← steps it back; a boolean
+		// just flips either way. h keeps meaning "back to sidebar", so only
+		// the arrow pair (and l, vim's right) cycles values.
+		case "enter", "l", "right":
+			a.changeSetting(1)
+		case "left":
+			a.changeSetting(-1)
 		case "esc", "h":
 			a.focus = model.FocusSidebar
 		}
@@ -1921,6 +1939,42 @@ func (a App) handleContentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return a, nil
+}
+
+// changeSetting applies a value change to the selected settings row and
+// persists it: booleans flip, the theme cycles delta steps.
+func (a *App) changeSetting(delta int) {
+	switch a.settings.SelectedKey() {
+	case "theme":
+		a.cycleTheme(delta)
+	case "check_duplicates":
+		a.config.CheckDuplicates = !a.config.CheckDuplicates
+		_ = config.Save(a.config)
+	}
+}
+
+// cycleTheme steps the Theme setting through theme.Options() (Auto, then
+// every built-in dark → medium → light), persists the choice, and re-resolves
+// the active theme immediately. The View fingerprint keys off the theme, so
+// every memoized panel repaints on the next frame — the switch is live, no
+// restart. Auto re-resolves against the background captured at startup.
+func (a *App) cycleTheme(delta int) {
+	opts := theme.Options()
+	cur := a.config.Theme
+	if cur == "" {
+		cur = theme.Auto
+	}
+	idx := 0 // unknown names (config typos) restart the cycle at Auto
+	for i, k := range opts {
+		if k == cur {
+			idx = i
+			break
+		}
+	}
+	idx = ((idx+delta)%len(opts) + len(opts)) % len(opts)
+	a.config.Theme = opts[idx]
+	_ = config.Save(a.config)
+	a.theme = theme.Resolve(a.config.Theme, a.termBg)
 }
 
 func (a App) handleLibraryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2227,8 +2281,9 @@ func (a App) View() string {
 	bc := th.Border // all inner panels use this border color
 
 	// Theme fingerprint — prefixed into every cache key so switching themes
-	// invalidates all memoized panels.
-	tf := string(th.Border) + "/" + string(th.BorderFocused) + "/" +
+	// invalidates all memoized panels. Name alone distinguishes the built-in
+	// themes; the color fields keep the key honest if names ever collide.
+	tf := th.Name + "/" + string(th.Border) + "/" + string(th.BorderFocused) + "/" +
 		string(th.Accent) + "/" + string(th.Surface) + "/" + string(th.FgDim)
 
 	// ── SONICA-style 6-panel grid layout ──

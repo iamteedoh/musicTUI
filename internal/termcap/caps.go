@@ -30,6 +30,11 @@ type Caps struct {
 	// against a guessed cell size overflows or under-fills its panel.
 	CellW, CellH int
 
+	// Bg is the terminal's background color as "#rrggbb" (OSC 11 reply),
+	// empty when the terminal didn't answer. Auto-theming uses it to pick a
+	// palette that stays legible on the user's actual background (MUS-32).
+	Bg string
+
 	// Raw is the terminal's unparsed reply, for `musicTUI --caps`. Terminals
 	// disagree wildly about these queries, so when artwork misbehaves the reply
 	// is the only ground truth.
@@ -53,20 +58,22 @@ func (c Caps) RawEscaped() string {
 }
 
 // query is the full probe payload: a kitty graphics support request, three
-// XTWINOPS size reports, and a Primary Device Attributes request last.
+// XTWINOPS size reports, a background color request, and a Primary Device
+// Attributes request last.
 //
 // DA1 is the fence. Every terminal answers it, and it answers *after* the
-// earlier queries, so seeing the DA1 reply means any kitty/size replies that
-// were coming have already arrived. Terminals that don't implement a given
-// query simply ignore it — none of these can hang.
+// earlier queries, so seeing the DA1 reply means any kitty/size/background
+// replies that were coming have already arrived. Terminals that don't
+// implement a given query simply ignore it — none of these can hang.
 //
 //	\x1b_G…a=q…      kitty graphics support        → \x1b_G…;OK\x1b\
 //	\x1b[16t         cell size in pixels           → \x1b[6;<h>;<w>t
 //	\x1b[14t         text area size in pixels      → \x1b[4;<h>;<w>t
 //	\x1b[18t         text area size in cells       → \x1b[8;<rows>;<cols>t
+//	\x1b]11;?…       background color              → \x1b]11;rgb:<r>/<g>/<b>\x1b\ (or BEL)
 //	\x1b[c           primary device attributes     → \x1b[?<a>;<b>;…c
 const query = "\x1b_Gi=" + "4211" + ",a=q,t=d,f=32,s=1,v=1;AAAAAA==\x1b\\" +
-	"\x1b[16t\x1b[14t\x1b[18t\x1b[c"
+	"\x1b[16t\x1b[14t\x1b[18t\x1b]11;?\x1b\\\x1b[c"
 
 // parseKittyReply reports whether buf contains kitty's positive graphics-support
 // reply: an APC "G" response carrying ";OK". Terminals that don't implement the
@@ -162,11 +169,66 @@ func parseCellSize(buf []byte) (w, h int) {
 	return pxW / cols, pxH / rows
 }
 
+// parseBgReply extracts the background color from an OSC 11 reply.
+//
+// The reply is ESC ] 11 ; rgb:<r>/<g>/<b> terminated by BEL or ST (ESC \),
+// where each channel is 1–4 hex digits scaled over its own width — kitty and
+// most modern terminals answer 16-bit ("rgb:1e1e/1e1e/2626"). Some terminals
+// answer rgba: with an alpha channel we ignore. Returns "#rrggbb", or "" when
+// the reply is absent or malformed — auto-theming then falls back to dark,
+// so a silent terminal can never make things worse than today.
+func parseBgReply(buf []byte) string {
+	s := string(buf)
+	start := strings.Index(s, "\x1b]11;")
+	if start < 0 {
+		return ""
+	}
+	rest := s[start+len("\x1b]11;"):]
+	end := strings.IndexAny(rest, "\x07\x1b")
+	if end < 0 {
+		return ""
+	}
+	spec := strings.ToLower(rest[:end])
+	switch {
+	case strings.HasPrefix(spec, "rgba:"):
+		spec = spec[len("rgba:"):]
+	case strings.HasPrefix(spec, "rgb:"):
+		spec = spec[len("rgb:"):]
+	default:
+		return ""
+	}
+	parts := strings.Split(spec, "/")
+	if len(parts) < 3 {
+		return ""
+	}
+	var out [3]byte
+	for i := 0; i < 3; i++ {
+		p := parts[i]
+		if len(p) < 1 || len(p) > 4 {
+			return ""
+		}
+		v, err := strconv.ParseUint(p, 16, 32)
+		if err != nil {
+			return ""
+		}
+		// Scale an n-digit channel to 8 bits: ffff→ff, fff→ff, f→ff.
+		max := uint64(1)<<(4*len(p)) - 1
+		out[i] = byte((v*255 + max/2) / max)
+	}
+	return "#" + hexByte(out[0]) + hexByte(out[1]) + hexByte(out[2])
+}
+
+func hexByte(b byte) string {
+	const digits = "0123456789abcdef"
+	return string([]byte{digits[b>>4], digits[b&0xf]})
+}
+
 // parseCaps turns a raw probe reply into Caps.
 func parseCaps(buf []byte) Caps {
 	c := Caps{
 		Kitty: parseKittyReply(buf),
 		Sixel: parseSixelReply(buf),
+		Bg:    parseBgReply(buf),
 		Raw:   string(buf),
 	}
 	c.CellW, c.CellH = parseCellSize(buf)
