@@ -12,11 +12,22 @@ import (
 type settingItem struct {
 	Key   string
 	Label string
-	Value func(config.Config) string
+	// Value renders the setting's current state. th is the active resolved
+	// theme, so the Theme row can show what Auto actually picked.
+	Value func(config.Config, theme.Theme) string
 }
 
 var settingItems = []settingItem{
-	{"check_duplicates", "Check for duplicate playlists on startup", func(c config.Config) string {
+	{"theme", "Theme", func(c config.Config, th theme.Theme) string {
+		if c.Theme == "" || c.Theme == theme.Auto {
+			// Auto shows its answer, so a user on a light terminal can see
+			// the detection worked before deciding to override it.
+			return "Auto — " + th.Name
+		}
+		t := theme.FromName(c.Theme)
+		return t.Name + " (" + string(t.Tier) + ")"
+	}},
+	{"check_duplicates", "Check for duplicate playlists on startup", func(c config.Config, _ theme.Theme) string {
 		if c.CheckDuplicates {
 			return "On"
 		}
@@ -60,13 +71,17 @@ func (s Settings) View(th theme.Theme, cfg config.Config, width, height int) str
 
 	for i, item := range settingItems {
 		label := item.Label
-		value := item.Value(cfg)
+		value := item.Value(cfg, th)
 
 		var valueStyle lipgloss.Style
-		if value == "On" {
+		switch value {
+		case "On":
 			valueStyle = lipgloss.NewStyle().Foreground(th.Accent).Bold(true)
-		} else {
+		case "Off":
 			valueStyle = lipgloss.NewStyle().Foreground(th.FgMuted)
+		default:
+			// Multi-choice values (the theme name) read as content, not state.
+			valueStyle = lipgloss.NewStyle().Foreground(th.FgDim)
 		}
 
 		if i == s.Selected {
@@ -85,7 +100,7 @@ func (s Settings) View(th theme.Theme, cfg config.Config, width, height int) str
 		}
 	}
 
-	b.WriteString("\n " + lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("Enter:toggle  Esc:back"))
+	b.WriteString("\n " + lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).Render("Enter:change  ←/→:cycle  Esc:back"))
 
 	return b.String()
 }

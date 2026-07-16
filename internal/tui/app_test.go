@@ -477,3 +477,104 @@ func TestStaleSixelPayloadIsDropped(t *testing.T) {
 		t.Fatal("after dropping a stale payload the panel must ask again")
 	}
 }
+
+// MUS-32: in Settings, Enter/→/l steps the selected setting forward and ←
+// steps back. For the Theme row that cycles Auto → dark → medium → light,
+// applies the palette live (no restart) and persists the choice.
+func TestSettingsThemeCyclingAppliesAndPersists(t *testing.T) {
+	config.SetDir(t.TempDir())
+	t.Cleanup(func() { config.SetDir("") })
+	t.Setenv("COLORFGBG", "") // make auto-detection deterministic under test
+
+	app := NewApp(config.Load(), "", "test")
+	app.onboard.Close() // empty config auto-opens the wizard, which captures keys
+	app.view = model.ViewSettings
+	app.focus = model.FocusContent
+
+	if app.config.Theme != "auto" || app.theme.Name != "Nord" {
+		t.Fatalf("fresh app: theme=%q resolved=%q, want auto resolving to Nord",
+			app.config.Theme, app.theme.Name)
+	}
+
+	// → on the Theme row (row 0): Auto steps to the first built-in.
+	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRight})
+	app = m.(App)
+	if app.config.Theme != theme.AllThemes[0] {
+		t.Fatalf("after →: config theme %q, want %q", app.config.Theme, theme.AllThemes[0])
+	}
+
+	// ← back to Auto, ← again wraps to the last option.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	app = m.(App)
+	if app.config.Theme != theme.Auto {
+		t.Fatalf("after ←: config theme %q, want auto", app.config.Theme)
+	}
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	app = m.(App)
+	last := theme.AllThemes[len(theme.AllThemes)-1]
+	if app.config.Theme != last {
+		t.Fatalf("← from Auto should wrap to %q, got %q", last, app.config.Theme)
+	}
+	if want := theme.FromName(last).Name; app.theme.Name != want {
+		t.Fatalf("theme not applied live: active %q, want %q", app.theme.Name, want)
+	}
+	if got := config.Load().Theme; got != last {
+		t.Fatalf("persisted theme %q, want %q — the choice must survive a restart", got, last)
+	}
+
+	// The boolean row still flips with the same keys.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app = m.(App)
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRight})
+	app = m.(App)
+	if !app.config.CheckDuplicates {
+		t.Fatal("→ on the check-duplicates row must toggle it on")
+	}
+}
+
+// The Settings panel owns l/←/→ while focused (they change values there);
+// everywhere else the global bindings keep them: l toggles lyrics, arrows
+// switch panels. Both directions of that contract are load-bearing — the
+// global handlers run first and used to swallow the keys before Settings
+// ever saw them.
+func TestSettingsKeysDoNotLeakToGlobalBindings(t *testing.T) {
+	config.SetDir(t.TempDir())
+	t.Cleanup(func() { config.SetDir("") })
+	t.Setenv("COLORFGBG", "")
+
+	app := NewApp(config.Load(), "", "test")
+	app.onboard.Close()
+	app.view = model.ViewSettings
+	app.focus = model.FocusContent
+
+	// l inside Settings cycles the theme and must not touch lyrics.
+	lyricsBefore := app.showLyrics
+	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = m.(App)
+	if app.showLyrics != lyricsBefore {
+		t.Fatal("l inside Settings toggled lyrics — the global binding swallowed it")
+	}
+	if app.config.Theme != theme.AllThemes[0] {
+		t.Fatalf("l inside Settings should cycle the theme, config = %q", app.config.Theme)
+	}
+
+	// Arrows inside Settings must not switch panels.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	app = m.(App)
+	if app.focus != model.FocusContent {
+		t.Fatalf("← inside Settings moved focus to %v, must stay on the panel", app.focus)
+	}
+
+	// Outside Settings the global bindings still win.
+	app.view = model.ViewHome
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = m.(App)
+	if app.showLyrics == lyricsBefore {
+		t.Fatal("l outside Settings must still toggle lyrics")
+	}
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	app = m.(App)
+	if app.focus != model.FocusSidebar {
+		t.Fatalf("← outside Settings must switch panels, focus = %v", app.focus)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
 	"github.com/iamteedoh/musicTUI/internal/termcap"
+	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
 )
@@ -121,6 +122,14 @@ func printCaps() {
 		style = "braille (character art)"
 	}
 
+	// What theme = "auto" would pick here — the probe's background answer,
+	// falling back to COLORFGBG, falling back to dark (MUS-32).
+	bg := caps.Bg
+	if bg == "" {
+		bg = "(no reply)"
+	}
+	auto := theme.Resolve(theme.Auto, caps.Bg)
+
 	fmt.Printf("musicTUI %s — terminal capabilities\n\n", Version)
 	fmt.Printf("  TERM           %s\n", os.Getenv("TERM"))
 	fmt.Printf("  TERM_PROGRAM   %s\n", os.Getenv("TERM_PROGRAM"))
@@ -128,6 +137,8 @@ func printCaps() {
 	fmt.Printf("  sixel graphics %t\n", caps.Sixel)
 	fmt.Printf("  cell size      %dx%d px\n", caps.CellW, caps.CellH)
 	fmt.Printf("  artwork        %s\n", style)
+	fmt.Printf("  background     %s\n", bg)
+	fmt.Printf("  auto theme     %s (%s)\n", auto.Name, auto.Tier)
 	fmt.Printf("\n  raw reply      %s\n", caps.RawEscaped())
 
 	if caps.CellW == 0 || caps.CellH == 0 {

@@ -20,8 +20,10 @@ func isolateUserConfig(t *testing.T) string {
 func TestDefaultConfig(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Theme != "nord" {
-		t.Fatalf("Theme = %q, want nord", cfg.Theme)
+	// "auto" adapts the palette to the terminal background (MUS-32) — a
+	// fresh install must never pin a dark theme onto a light terminal.
+	if cfg.Theme != "auto" {
+		t.Fatalf("Theme = %q, want auto", cfg.Theme)
 	}
 	if cfg.TickRateMs != 33 {
 		t.Fatalf("TickRateMs = %d, want 33", cfg.TickRateMs)
@@ -92,6 +94,99 @@ func TestLoadNormalizesInvalidNumericValues(t *testing.T) {
 	}
 	if got.Volume != 75 {
 		t.Fatalf("Volume = %d, want 75", got.Volume)
+	}
+}
+
+// Every config.toml ever written by a pre-MUS-32 build carries theme = "nord"
+// — the old default, which Save() persisted whether or not the user cared,
+// and which nothing in the app could change. Honoring it as a choice pinned
+// every existing user to a dark palette and meant auto-detection only ever
+// ran on fresh installs: the exact opposite of what MUS-32 is for.
+func TestLoadMigratesPreThemePickerDefaultToAuto(t *testing.T) {
+	isolateUserConfig(t)
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+	}
+
+	// Exactly what a pre-MUS-32 install has on disk: no config_version, and
+	// the old default theme. Must become auto so detection can run.
+	write("theme = \"nord\"\ntick_rate_ms = 33\nvolume = 75\n")
+	got := Load()
+	if got.Theme != "auto" {
+		t.Fatalf("Theme = %q for an unversioned config, want auto — existing users never get the MUS-32 fix otherwise", got.Theme)
+	}
+	if got.Version != Version {
+		t.Fatalf("Version = %d after migration, want %d", got.Version, Version)
+	}
+	// Unrelated settings must survive the migration untouched.
+	if got.Volume != 75 || got.TickRateMs != 33 {
+		t.Fatalf("migration disturbed other settings: %#v", got)
+	}
+
+	// A theme hand-edited to anything but the old default is a real choice.
+	write("theme = \"dracula\"\n")
+	if got := Load().Theme; got != "dracula" {
+		t.Fatalf("Theme = %q, a hand-picked theme must never be migrated", got)
+	}
+
+	// Once a versioned build has written the config, the picker existed —
+	// so "nord" there IS a deliberate choice and must stick.
+	write("config_version = 1\ntheme = \"nord\"\n")
+	if got := Load().Theme; got != "nord" {
+		t.Fatalf("Theme = %q for a versioned config, want nord — an explicit pick must not be re-migrated", got)
+	}
+}
+
+// Choosing Nord in the picker must survive a restart — the migration must not
+// reinterpret it as the old default on the next launch.
+func TestExplicitNordChoiceSurvivesRestart(t *testing.T) {
+	isolateUserConfig(t)
+
+	cfg := Default()
+	cfg.Theme = "nord" // as the settings picker would store it
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if got := Load().Theme; got != "nord" {
+		t.Fatalf("Theme = %q after save/reload, want nord — the picker's choice was migrated away", got)
+	}
+}
+
+// A config that predates the theme key (or blanked it) must get
+// auto-detection, while an explicit choice is always preserved.
+func TestLoadNormalizesTheme(t *testing.T) {
+	isolateUserConfig(t)
+
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("theme = \"\"\nvolume = 50\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if got := Load().Theme; got != "auto" {
+		t.Fatalf("Theme = %q after loading an empty theme key, want auto", got)
+	}
+
+	if err := os.WriteFile(path, []byte("theme = \"gruvbox\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if got := Load().Theme; got != "gruvbox" {
+		t.Fatalf("Theme = %q, an explicit theme choice must survive Load", got)
 	}
 }
 

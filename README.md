@@ -472,6 +472,7 @@ Select **Settings** from the sidebar.
 
 | Setting | What It Does |
 |---------|-------------|
+| **Theme** | The color palette. **Auto** (the default) reads your terminal's background color and picks a dark, medium, or light palette to match — the row shows what it chose, e.g. `Auto — Nord`. Step through Auto and the 13 built-in themes with **Enter** / **→**, or back with **←**; the new palette applies instantly. |
 | **Check for duplicate playlists on startup** | When On, the app checks for duplicate and empty playlists each time you open it. Toggle with **Enter**. |
 
 Settings are saved automatically and persist between sessions.
@@ -519,8 +520,14 @@ musicTUI --config-dir /tmp/musictui-test
 Here is a complete example with all available options:
 
 ```toml
-# Visual theme: "nord", "dracula", "catppuccin", "gruvbox", "tokyonight"
-theme = "nord"
+# Visual theme. "auto" (the default) matches your terminal's background:
+# it picks a dark, medium, or light palette so text stays legible whatever
+# colors your terminal uses. Or pin one of the built-in themes —
+#   dark:   "nord", "dracula", "catppuccin", "gruvbox", "tokyo_night"
+#   medium: "solarized", "everforest", "rose_pine_moon", "monokai_pro"
+#   light:  "solarized_light", "catppuccin_latte", "gruvbox_light", "github_light"
+# You can also switch themes live from the Settings screen inside the app.
+theme = "auto"
 
 # Default playback volume (0-100)
 volume = 75
