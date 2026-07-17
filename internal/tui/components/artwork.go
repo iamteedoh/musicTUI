@@ -37,10 +37,14 @@ type Artwork struct {
 	placedRows     int
 	oob            strings.Builder
 
-	// Sixel state. Unlike kitty, a sixel image is painted at the cursor with
-	// nothing binding it to the frame, so it needs the panel's absolute screen
-	// position and the terminal's pixel-per-cell size. Zero values mean "we
-	// weren't told", and the renderer falls back to blocks rather than guess.
+	// Cursor-positioned image state, shared by the sixel and iTerm2 tiers.
+	// Unlike kitty, both paint the image at the cursor with nothing binding
+	// it to the frame, so they need the panel's absolute screen position —
+	// and sixel additionally the terminal's pixel-per-cell size (iTerm2's
+	// protocol is sized in cells and skips that requirement, MUS-30). Zero
+	// values mean "we weren't told", and the renderer falls back to blocks
+	// rather than guess. The field names say "sixel" because that tier came
+	// first; the plumbing is protocol-agnostic.
 	cellW, cellH int
 	originCol    int // 1-based column of the artwork content area
 	originRow    int // 1-based row of the artwork content area
@@ -156,7 +160,10 @@ func (a *Artwork) Origin() (col, row int) {
 }
 
 // UsesSixel reports whether the cover is painted as a sixel image, whose pixels
-// live outside the character grid and so need special care when the layout moves.
+// live outside the character grid and so need special care when the layout moves
+// (a full screen erase — some terminals never erase sixel pixels under text).
+// Deliberately false for StyleITerm2: iTerm2 binds image slices to the cells
+// they cover, so overwriting the cells erases them and no erase is needed.
 func (a *Artwork) UsesSixel() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -164,9 +171,12 @@ func (a *Artwork) UsesSixel() bool {
 }
 
 // SixelWork is a cover that needs encoding for the panel's current geometry.
+// Style selects the wire format: a sixel DCS sized in pixels (PxW/PxH), or an
+// iTerm2 OSC 1337 File= sized in cells (Cols/Rows, PxW/PxH unused).
 type SixelWork struct {
 	Img        image.Image
 	URL        string
+	Style      ArtworkStyle
 	PxW, PxH   int
 	Cols, Rows int
 }
@@ -181,8 +191,8 @@ type SixelWork struct {
 func (a *Artwork) PendingSixel() (SixelWork, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.style != StyleSixel || a.img == nil || a.wantURL == "" ||
-		a.wantCols <= 0 || a.wantRows <= 0 {
+	if (a.style != StyleSixel && a.style != StyleITerm2) || a.img == nil ||
+		a.wantURL == "" || a.wantCols <= 0 || a.wantRows <= 0 {
 		return SixelWork{}, false
 	}
 	if a.sixelPayload != "" && a.sixelURL == a.wantURL &&
@@ -190,7 +200,7 @@ func (a *Artwork) PendingSixel() (SixelWork, bool) {
 		return SixelWork{}, false // already have it
 	}
 	return SixelWork{
-		Img: a.img, URL: a.wantURL,
+		Img: a.img, URL: a.wantURL, Style: a.style,
 		PxW: a.wantPxW, PxH: a.wantPxH,
 		Cols: a.wantCols, Rows: a.wantRows,
 	}, true
@@ -209,9 +219,15 @@ func (a *Artwork) SetSixelPayload(url string, cols, rows int, payload string) bo
 	return true
 }
 
-// EncodeSixel renders w to a sixel DCS payload. Safe to call off the event
-// loop: it touches nothing on the Artwork.
-func EncodeSixel(w SixelWork) (string, error) { return sixelEncode(w.Img, w.PxW, w.PxH) }
+// EncodeSixel renders w to its wire format — a sixel DCS, or an iTerm2 OSC
+// 1337 File= when w.Style says so. Safe to call off the event loop: it
+// touches nothing on the Artwork.
+func EncodeSixel(w SixelWork) (string, error) {
+	if w.Style == StyleITerm2 {
+		return iterm2Encode(w.Img, w.Cols, w.Rows)
+	}
+	return sixelEncode(w.Img, w.PxW, w.PxH)
+}
 
 // SixelDraw returns the cursor-positioned payload for the current cover and the
 // 1-based screen rows it covers. Empty when nothing is drawn with sixel.
@@ -311,6 +327,8 @@ func (a *Artwork) View(th theme.Theme, width, height int) string {
 		imgStr = a.renderPlaceholders(width, imgHeight)
 	case StyleSixel:
 		imgStr = a.renderSixel(width, imgHeight)
+	case StyleITerm2:
+		imgStr = a.renderITerm2(width, imgHeight)
 	case StyleBraille:
 		a.clearSixelDraw()
 		imgStr = a.renderBraille(width, imgHeight)
@@ -491,6 +509,79 @@ func (a *Artwork) renderSixel(width, height int) string {
 
 	// Publish the draw for the app layer, which decides when the pixels need
 	// repainting. Writing it here would be one frame too early anyway.
+	a.drawSeq = sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload)
+	a.drawRow = a.originRow + topPad
+	a.drawRows = cellsH
+
+	return blankRows(topPad, leftPad, cellsW, cellsH)
+}
+
+// renderITerm2 paints the cover as real pixels via iTerm2's OSC 1337 File=
+// protocol, and returns the blank cells the image sits on. Caller must hold
+// a.mu.
+//
+// Same contract as renderSixel — the payload is encoded off the event loop
+// (PendingSixel/SetSixelPayload) and the draw republished on every call — but
+// the geometry differs: the protocol is sized in character cells, so the cover
+// is fitted with the 1-wide × 2-tall cell assumption every character renderer
+// uses, and the terminal's pixel cell size is not needed at all. That is the
+// point of this tier: iTerm2 reports no usable cell size (MUS-30).
+//
+// Falls back to blocks only when the panel's screen position is unknown.
+func (a *Artwork) renderITerm2(width, height int) string {
+	a.clearSixelDraw() // republished below; every early return leaves it cleared
+	if a.originCol <= 0 || a.originRow <= 0 {
+		return a.renderBlocks(width, height)
+	}
+	bounds := a.img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW == 0 || srcH == 0 {
+		return ""
+	}
+	charW := width - 2
+	charH := height
+	if charW < 1 || charH < 1 {
+		return a.renderBlocks(width, height)
+	}
+
+	// Fit the cover into the panel treating cells as 1×2 units, exactly like
+	// renderPlaceholders — iTerm2 then scales the image to that cell box.
+	scale := float64(srcW) / float64(charW)
+	if s := float64(srcH) / float64(charH*2); s > scale {
+		scale = s
+	}
+	cellsW := int(float64(srcW) / scale)
+	cellsH := int(float64(srcH) / scale / 2)
+	if cellsW < 1 {
+		cellsW = 1
+	}
+	if cellsH < 1 {
+		cellsH = 1
+	}
+
+	leftPad := (width - cellsW) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	topPad := (height - cellsH) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	// Record what the panel needs; the app layer encodes it asynchronously
+	// (PNG + base64 of a full cover is the same "tens of milliseconds" class
+	// as a sixel encode — too slow for View, which runs on the event loop).
+	a.wantURL, a.wantCols, a.wantRows = a.imageURL, cellsW, cellsH
+	a.wantPxW, a.wantPxH = 0, 0 // cell-sized protocol; pixels unused
+
+	if a.sixelPayload == "" || a.sixelURL != a.imageURL ||
+		a.sixelCols != cellsW || a.sixelRows != cellsH {
+		return blankRows(topPad, leftPad, cellsW, cellsH) // not encoded yet
+	}
+
+	// Publish the draw for the app layer, which decides when the pixels need
+	// repainting — the same clobber-repaint dance as sixel.
 	a.drawSeq = sixelAt(a.originRow+topPad, a.originCol+leftPad, a.sixelPayload)
 	a.drawRow = a.originRow + topPad
 	a.drawRows = cellsH

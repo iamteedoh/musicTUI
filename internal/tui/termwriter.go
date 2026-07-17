@@ -27,33 +27,99 @@ import (
 type TermWriter struct {
 	*os.File
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// pending is the staged payload; atomic records that it must render
+	// together with the frame rather than merely after it (see QueueAtomic).
 	pending  []byte
+	atomic   bool
 	queuedAt time.Time
 }
 
+// Synchronized output — DEC private mode 2026, "BSU/ESU". Between these the
+// terminal parses as usual but renders NOTHING, then applies the whole batch
+// as one atomic update.
+//
+// This is what stops a CURSOR-POSITIONED cover (sixel, iTerm2) flickering.
+// Painting one is inherently two steps: the frame blanks the cells (destroying
+// the pixels on them), then the payload paints them back. A terminal refreshes
+// on its own clock, so it is free to draw the screen in between — and it does:
+// the artwork blinked out every time a lyric advanced, because the lyrics panel
+// keeps the active line centered, so ALL of its lines change and Bubble Tea
+// rewrites every line the cover sits on (MUS-30). Inside a synchronized update
+// the blank state is never rendered, so there is nothing to see.
+//
+// It is deliberately NOT used for kitty payloads. Kitty placeholders are text
+// cells the terminal redraws the image from itself, so no frame can blank them
+// and there is no gap to hide — while an image transmit is ~1 MB, and holding a
+// terminal's render back for a megabyte to arrive buys nothing and costs
+// whatever that terminal does when a synchronized update overruns. Wrap only
+// what needs wrapping; QueueAtomic is how a caller says so.
+//
+// Unsupported modes are ignored by definition, so terminals without it are no
+// worse off than before. A terminal that does support it must also time the
+// update out (the spec requires it), so a write that dies between BSU and ESU
+// cannot wedge the screen.
+const (
+	beginSyncUpdate = "\x1b[?2026h"
+	endSyncUpdate   = "\x1b[?2026l"
+)
+
 func NewTermWriter(f *os.File) *TermWriter { return &TermWriter{File: f} }
 
-// Write emits p (a rendered frame), then any staged graphics payload.
+// Write emits p (a rendered frame), then any staged graphics payload, in one
+// write.
+//
+// A payload staged by QueueAtomic additionally wraps the pair in a
+// synchronized update: the frame's erase and the image's repaint have to reach
+// the terminal as one indivisible unit, or the erase is visible on its own.
+// Everything else — a bare frame, or a kitty transmit that no frame can erase —
+// is passed through as the same bytes it always was.
 func (t *TermWriter) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n, err := t.File.Write(p)
-	if err != nil {
-		return n, err
+	if len(t.pending) == 0 {
+		return t.File.Write(p)
 	}
-	t.flushLocked()
-	return n, nil
+
+	buf := make([]byte, 0, len(beginSyncUpdate)+len(p)+len(t.pending)+len(endSyncUpdate))
+	if t.atomic {
+		buf = append(buf, beginSyncUpdate...)
+	}
+	buf = append(buf, p...)
+	buf = append(buf, t.pending...)
+	if t.atomic {
+		buf = append(buf, endSyncUpdate...)
+	}
+	t.pending, t.atomic = nil, false
+	t.queuedAt = time.Time{}
+
+	if _, err := t.File.Write(buf); err != nil {
+		return 0, err
+	}
+	// Report only the frame bytes: the caller handed us p, not the wrapper.
+	return len(p), nil
 }
 
-// Queue stages graphics escapes for the moment after the next frame.
-func (t *TermWriter) Queue(seq string) {
+// Queue stages graphics escapes for the moment after the next frame — for
+// payloads the frame cannot damage, such as a kitty transmit or placement.
+func (t *TermWriter) Queue(seq string) { t.queue(seq, false) }
+
+// QueueAtomic stages graphics escapes that must render TOGETHER with the next
+// frame rather than merely after it: an image painted at the cursor lives on
+// cells that frame is about to blank, so a terminal that refreshes between the
+// two shows the cover blinking. See the synchronized-update constants above.
+func (t *TermWriter) QueueAtomic(seq string) { t.queue(seq, true) }
+
+func (t *TermWriter) queue(seq string, atomic bool) {
 	if seq == "" {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.pending = append(t.pending, seq...)
+	// Mixed payloads are wrapped as a whole: the atomic one sets the terms,
+	// and a kitty payload inside the wrapper would merely be redundant.
+	t.atomic = t.atomic || atomic
 	if t.queuedAt.IsZero() {
 		t.queuedAt = time.Now()
 	}
@@ -66,6 +132,9 @@ func (t *TermWriter) Queue(seq string) {
 // screen a queued image could wait indefinitely. If nothing has been drawn for
 // maxAge, the last frame on screen is by definition the one that blanked our
 // cells — so it is safe, and necessary, to paint now.
+//
+// No synchronized update here: that frame was rendered long ago, so this is a
+// lone repaint with no erase to hide behind it.
 func (t *TermWriter) FlushStale(maxAge time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -80,6 +149,6 @@ func (t *TermWriter) flushLocked() {
 		return
 	}
 	_, _ = t.File.Write(t.pending)
-	t.pending = nil
+	t.pending, t.atomic = nil, false
 	t.queuedAt = time.Time{}
 }

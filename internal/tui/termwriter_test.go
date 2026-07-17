@@ -37,11 +37,11 @@ func tempWriter(t *testing.T) (*TermWriter, func() string) {
 
 // The whole point: a queued image must land AFTER the frame that blanks its
 // cells. Reversed, the frame erases the pixels — which is exactly how the
-// artwork kept vanishing.
+// artwork kept vanishing (MUS-29).
 func TestQueuedPayloadIsWrittenAfterTheFrame(t *testing.T) {
 	tw, read := tempWriter(t)
 
-	tw.Queue("<SIXEL>")
+	tw.Queue("<KITTY>")
 	if got := read(); got != "" {
 		t.Fatalf("queue wrote %q before any frame", got)
 	}
@@ -51,7 +51,7 @@ func TestQueuedPayloadIsWrittenAfterTheFrame(t *testing.T) {
 	}
 
 	got := read()
-	if got != "<FRAME><SIXEL>" {
+	if got != "<FRAME><KITTY>" {
 		t.Fatalf("got %q, want frame then payload", got)
 	}
 
@@ -59,8 +59,67 @@ func TestQueuedPayloadIsWrittenAfterTheFrame(t *testing.T) {
 	if _, err := tw.Write([]byte("<FRAME2>")); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(); got != "<FRAME><SIXEL><FRAME2>" {
+	if got := read(); got != "<FRAME><KITTY><FRAME2>" {
 		t.Fatalf("payload was re-emitted: %q", got)
+	}
+}
+
+// A cursor-positioned repaint must render as ONE update with the frame that
+// blanks its cells, or the terminal draws the blank state on its own refresh
+// and the cover blinks on every lyric (MUS-30).
+func TestAtomicPayloadRendersWithTheFrame(t *testing.T) {
+	tw, read := tempWriter(t)
+
+	tw.QueueAtomic("<SIXEL>")
+	if _, err := tw.Write([]byte("<FRAME>")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := read(); got != beginSyncUpdate+"<FRAME><SIXEL>"+endSyncUpdate {
+		t.Fatalf("got %q, want frame then payload inside one synchronized update", got)
+	}
+
+	// A bare frame needs no wrapper — 60 times a second, for nothing.
+	if _, err := tw.Write([]byte("<FRAME2>")); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != beginSyncUpdate+"<FRAME><SIXEL>"+endSyncUpdate+"<FRAME2>" {
+		t.Fatalf("a bare frame was wrapped, or the payload was re-emitted: %q", got)
+	}
+}
+
+// Kitty payloads must go out EXACTLY as they did before synchronized output
+// existed. A kitty image rides on placeholder cells the terminal redraws
+// itself, so no frame can erase it and there is no gap to close — while the
+// transmit is ~1 MB, and holding a terminal's render back for a megabyte to
+// arrive is how covers stopped appearing in Ghostty at all.
+func TestKittyTransmitIsNotSynchronized(t *testing.T) {
+	tw, read := tempWriter(t)
+
+	tw.Queue("\x1b_Ga=t,q=2,f=100,i=42,m=0;PAYLOAD\x1b\\")
+	if _, err := tw.Write([]byte("<FRAME>")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := read()
+	if strings.Contains(got, beginSyncUpdate) || strings.Contains(got, endSyncUpdate) {
+		t.Fatalf("a kitty transmit was wrapped in a synchronized update: %q", got)
+	}
+	if got != "<FRAME>\x1b_Ga=t,q=2,f=100,i=42,m=0;PAYLOAD\x1b\\" {
+		t.Fatalf("kitty bytes were not passed through unchanged: %q", got)
+	}
+}
+
+// A lone repaint (no frame to hide) must NOT be wrapped: there is no erase to
+// make atomic, and an unpaired BSU on a terminal that honors it stalls the
+// screen until its timeout.
+func TestStaleFlushIsNotSynchronized(t *testing.T) {
+	tw, read := tempWriter(t)
+	tw.Queue("<SIXEL>")
+	tw.FlushStale(0)
+
+	if got := read(); got != "<SIXEL>" {
+		t.Fatalf("got %q, want a bare payload", got)
 	}
 }
 
@@ -134,5 +193,10 @@ func TestConcurrentQueueAndWrite(t *testing.T) {
 	// No payload may ever appear before the first frame.
 	if strings.HasPrefix(got, "<S>") {
 		t.Fatal("a payload was written before any frame")
+	}
+	// Every synchronized update must be closed, whichever goroutine raced:
+	// an unpaired BSU leaves the terminal holding its screen back.
+	if b, e := strings.Count(got, beginSyncUpdate), strings.Count(got, endSyncUpdate); b != e {
+		t.Fatalf("%d synchronized updates opened but %d closed", b, e)
 	}
 }

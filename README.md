@@ -67,7 +67,7 @@ A terminal-based music player for Spotify. Browse your library, search for music
 - **Spotify playback** — stream your library, search the Spotify catalog, and control playback entirely from the terminal (Premium required for audio).
 - **Real-time audio visualizer** — a CAVA-style spectrum analyzer (the engine behind the popular "Kurve" desktop widget) that's tightly synced to the **beat and tempo**, with a horizontal rainbow gradient, falling peak-hold caps, and a live BPM readout. Tunable at runtime — see [Audio Visualizer](#audio-visualizer).
 - **Synced lyrics** — line-synced lyrics that scroll with the music, inline or full-screen.
-- **Album artwork** — the current cover rendered right in your terminal. **Pixel-perfect** in terminals that support kitty-graphics Unicode placeholders ([kitty](https://sw.kovidgoyal.net/kitty/), [Ghostty](https://ghostty.org)); high-detail character art everywhere else. See [Album Artwork](#album-artwork).
+- **Album artwork** — the current cover rendered right in your terminal. **Pixel-perfect** in [kitty](https://sw.kovidgoyal.net/kitty/), [Ghostty](https://ghostty.org), **iTerm2**, and sixel terminals (Windows Terminal, Konsole, WezTerm, …); high-detail character art everywhere else. See [Album Artwork](#album-artwork).
 - **Full library & playlist management** — browse, search, and create / edit / delete / reorder playlists, move tracks between them, and clean up duplicate or empty playlists.
 - **Library import** — bring your playlists and liked songs over from **YouTube Music** and **Apple Music**.
 - **Media-key support** (Linux / D-Bus) plus a fast, fully keyboard-driven UI.
@@ -419,13 +419,15 @@ The right panel shows the current track's album cover. How sharp it looks depend
 
 - **Pixel-perfect via sixel** — in terminals that speak sixel graphics: **Windows Terminal 1.22+**, WezTerm, xterm (`-ti vt340`), mintty, foot and **Konsole**. Also detected automatically, so Windows gets the real cover rather than character art.
 
+- **Pixel-perfect in iTerm2** — via iTerm2's own [inline images protocol](https://iterm2.com/documentation-images.html) (`OSC 1337 File=`). iTerm2 answers the kitty graphics query without rendering the placeholders musicTUI uses, and reports no usable cell size for sixel — so it gets its native protocol instead, which sizes images in character cells and needs neither.
+
 - **Character art** — everywhere else (Terminal.app, Warp, tmux, and any terminal that answers neither probe): the cover is drawn with colored block elements, each cell chosen by error minimization for the closest possible match. Character art is inherently limited by the terminal's cell grid.
 
-Detection asks the terminal directly (a kitty graphics query plus the Primary Device Attributes reply, where sixel is attribute `4`) rather than guessing from `$TERM`. Sixel additionally needs the terminal to report its cell size in pixels; if it won't, musicTUI falls back to character art rather than misplacing the image.
+Detection asks the terminal directly (a kitty graphics query plus the Primary Device Attributes reply, where sixel is attribute `4`) rather than guessing from `$TERM`. Sixel additionally needs the terminal to report its cell size in pixels; if it won't, musicTUI falls back to character art rather than misplacing the image. iTerm2 is the exception: it names itself (`TERM_PROGRAM`, or `LC_TERMINAL` over ssh) and is routed to its native protocol.
 
 Run `musicTUI --caps` inside a terminal to see exactly what it reports and which renderer that selects.
 
-> **Note on Konsole.** Konsole answers the kitty graphics query affirmatively because it implements image *transmission*, but it has no support for the protocol's Unicode placeholders — the part that binds an image to a rectangle of cells. It therefore uses the sixel path, which it does implement fully.
+> **Note on Konsole.** Konsole answers the kitty graphics query affirmatively because it implements image *transmission*, but it has no support for the protocol's Unicode placeholders — the part that binds an image to a rectangle of cells. It therefore uses the sixel path, which it does implement fully. iTerm2 answers the same query the same way with the same gap — it uses its native inline-image protocol instead.
 
 Override auto-detection with `MUSICTUI_ARTWORK` when launching:
 
@@ -433,6 +435,7 @@ Override auto-detection with `MUSICTUI_ARTWORK` when launching:
 | --- | --- |
 | `kitty` | Force pixel graphics via kitty Unicode placeholders |
 | `sixel` | Force pixel graphics via sixel |
+| `iterm2` | Force pixel graphics via iTerm2 inline images |
 | `blocks` | Force block-element character art (the universal fallback) |
 | `braille` | Braille-over-background character art — finer dots, more texture; some prefer it |
 
