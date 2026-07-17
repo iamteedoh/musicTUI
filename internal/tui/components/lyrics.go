@@ -61,7 +61,11 @@ func (l Lyrics) View(th theme.Theme, width, height int, positionMs int64) string
 			lipgloss.NewStyle().Foreground(th.FgDim).Italic(true).Render("Loading lyrics...")
 	}
 	if l.Error != "" {
-		return lipgloss.NewStyle().Foreground(th.Error).Render(" ✗ " + l.Error)
+		// l.Error is already user-facing text (lyrics.UserMessage) — never a
+		// raw Go error. The hint row advertises the banner's two keys, in
+		// the same style every other panel uses (MUS-33).
+		return lipgloss.NewStyle().Foreground(th.Error).Render(" ✗ "+l.Error) + "\n " +
+			RenderHints(th, []Hint{{Key: "ctrl+r", Desc: "retry"}, {Key: "esc", Desc: "dismiss"}})
 	}
 	if !l.Synced && l.PlainText == "" && len(l.Lines) == 0 {
 		return lipgloss.NewStyle().Foreground(th.FgMuted).Italic(true).

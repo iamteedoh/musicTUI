@@ -241,11 +241,19 @@ type LyricsLoadedMsg struct {
 	TrackID string
 }
 
+// LyricsErrorMsg reports a failed lyrics fetch. Message is the short
+// user-facing text (already mapped by lyrics.UserMessage) — never the raw
+// error, which must not reach the panel or the status line (MUS-33).
+type LyricsErrorMsg struct {
+	TrackID string
+	Message string
+}
+
 func FetchLyricsCmd(trackName, artistName string, durationSec int, trackID string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := lyrics.Fetch(trackName, artistName, durationSec)
 		if err != nil {
-			return DataErrorMsg{Err: err}
+			return LyricsErrorMsg{TrackID: trackID, Message: lyrics.UserMessage(err)}
 		}
 		return LyricsLoadedMsg{Result: result, TrackID: trackID}
 	}

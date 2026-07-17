@@ -857,7 +857,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case LyricsLoadedMsg:
+		// Drop stale results: with Fetch's silent retry a slow response for
+		// the previous track can land after the user has skipped ahead.
+		if msg.TrackID != a.lyrics.TrackID {
+			return a, nil
+		}
 		a.lyrics.SetLyrics(msg.Result, msg.TrackID)
+		return a, nil
+	case LyricsErrorMsg:
+		if msg.TrackID != a.lyrics.TrackID {
+			return a, nil
+		}
+		// Panel-only: a lyrics failure never touches a.status — playback is
+		// unaffected and the banner carries its own retry/dismiss hints.
+		a.lyrics.SetError(msg.Message)
 		return a, nil
 	case ArtworkLoadedMsg:
 		if msg.Result.Err != "" {
@@ -1020,10 +1033,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.playlist.PlayingTrackID = msg.Track.ID
 			a.status = "Loading track..."
 
-			// Fetch lyrics for the new track
+			// Fetch lyrics for the new track. Clear any banner from the
+			// previous track — lyricsErrorShown keys off Error, and a stale
+			// banner would own esc while the new fetch is still loading.
 			durationSec := int(msg.Track.Duration.Seconds())
 			lyricCmd := FetchLyricsCmd(msg.Track.Name, msg.Track.ArtistNames(), durationSec, msg.Track.ID)
 			a.lyrics.Loading = true
+			a.lyrics.Error = ""
 			a.lyrics.TrackID = msg.Track.ID
 
 			// Load album artwork + info
@@ -1140,6 +1156,28 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Modal captures all input when active
 	if a.modal.Active {
 		return a.handleModalKey(msg)
+	}
+
+	// A visible lyrics fetch-failure banner owns exactly the two keys its
+	// hint advertises — retry and dismiss (MUS-33). They are routed ahead of
+	// the switches below for the same reason as settingsOwnsKeys (MUS-32):
+	// anything later is either swallowed by the global playback letters or
+	// changes meaning per view. Every other key falls through untouched, so
+	// r/l/s/n/p keep their playback bindings while the banner is up.
+	if a.lyricsErrorShown() && !a.isSearchInputFocused() {
+		switch msg.String() {
+		case "ctrl+r":
+			if t := a.playback.Track; t != nil {
+				a.lyrics.Loading = true
+				a.lyrics.Error = ""
+				a.lyrics.TrackID = t.ID
+				return a, FetchLyricsCmd(t.Name, t.ArtistNames(), int(t.Duration.Seconds()), t.ID)
+			}
+			return a, nil
+		case "esc":
+			a.lyrics.SetError("")
+			return a, nil
+		}
 	}
 
 	// Global keys
@@ -1711,6 +1749,20 @@ func (a App) findEmptyPlaylists() []model.Playlist {
 
 func (a App) isSearchInputFocused() bool {
 	return a.view == model.ViewSearch && !a.search.ResultsFocused
+}
+
+// lyricsErrorShown reports whether the lyrics fetch-failure banner is
+// actually on screen — in the full Lyrics view, or in the inline panel any
+// other view renders while a track is playing. Its retry/dismiss keys are
+// live only then; a hidden banner must never eat a keypress.
+func (a App) lyricsErrorShown() bool {
+	if a.lyrics.Error == "" {
+		return false
+	}
+	if a.view == model.ViewLyrics {
+		return true
+	}
+	return a.showLyrics && a.playback.Track != nil
 }
 
 func (a App) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

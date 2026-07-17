@@ -2,6 +2,7 @@ package lyrics
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,8 +32,70 @@ type lrcResponse struct {
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-// Fetch retrieves lyrics from lrclib.net for the given track.
+// baseURL is a package var so tests can point Fetch at a local server.
+var baseURL = "https://lrclib.net"
+
+// retryBackoff is the pause before Fetch's single silent retry of a
+// transient failure. Package var so tests can zero it.
+var retryBackoff = 2 * time.Second
+
+// ErrKind classifies a lyrics fetch failure for user-facing display.
+type ErrKind int
+
+const (
+	// ErrNetwork: the request never completed (DNS, refused, timeout).
+	ErrNetwork ErrKind = iota
+	// ErrServiceBusy: lrclib answered 429 or a 5xx — usually transient.
+	ErrServiceBusy
+	// ErrBadResponse: unexpected status or an unparseable body.
+	ErrBadResponse
+)
+
+// FetchError wraps a lyrics fetch failure with a classification the UI can
+// map to a short plain-language message. The wrapped error keeps the raw
+// detail (URL, query string, transport error) available for debugging while
+// keeping it out of the panel (MUS-33).
+type FetchError struct {
+	Kind ErrKind
+	Err  error
+}
+
+func (e *FetchError) Error() string { return e.Err.Error() }
+func (e *FetchError) Unwrap() error { return e.Err }
+
+// UserMessage maps a Fetch failure to a short message safe to render in the
+// TUI: no URLs, no query strings, no raw Go error chains (MUS-33).
+func UserMessage(err error) string {
+	var fe *FetchError
+	if errors.As(err, &fe) {
+		switch fe.Kind {
+		case ErrNetwork:
+			return "Couldn't reach the lyrics service"
+		case ErrServiceBusy:
+			return "The lyrics service is busy, try again shortly"
+		}
+	}
+	return "Couldn't load lyrics for this track"
+}
+
+// Fetch retrieves lyrics from lrclib.net for the given track. Transient
+// failures (network, rate limit, server error) are retried once after a
+// short backoff before being reported — most of them clear on their own.
 func Fetch(trackName, artistName string, durationSec int) (*Result, error) {
+	result, err := fetchOnce(trackName, artistName, durationSec)
+	if isTransient(err) {
+		time.Sleep(retryBackoff)
+		result, err = fetchOnce(trackName, artistName, durationSec)
+	}
+	return result, err
+}
+
+func isTransient(err error) bool {
+	var fe *FetchError
+	return errors.As(err, &fe) && (fe.Kind == ErrNetwork || fe.Kind == ErrServiceBusy)
+}
+
+func fetchOnce(trackName, artistName string, durationSec int) (*Result, error) {
 	params := url.Values{
 		"track_name":  {trackName},
 		"artist_name": {artistName},
@@ -41,16 +104,16 @@ func Fetch(trackName, artistName string, durationSec int) (*Result, error) {
 		params.Set("duration", strconv.Itoa(durationSec))
 	}
 
-	reqURL := "https://lrclib.net/api/get?" + params.Encode()
+	reqURL := baseURL + "/api/get?" + params.Encode()
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, &FetchError{Kind: ErrBadResponse, Err: err}
 	}
 	req.Header.Set("User-Agent", "musicTUI/1.0 (https://github.com/iamteedoh/musicTUI)")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("lrclib request failed: %w", err)
+		return nil, &FetchError{Kind: ErrNetwork, Err: fmt.Errorf("lrclib request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
@@ -58,12 +121,16 @@ func Fetch(trackName, artistName string, durationSec int) (*Result, error) {
 		return &Result{}, nil // no lyrics found
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("lrclib returned status %d", resp.StatusCode)
+		kind := ErrBadResponse
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			kind = ErrServiceBusy
+		}
+		return nil, &FetchError{Kind: kind, Err: fmt.Errorf("lrclib returned status %d", resp.StatusCode)}
 	}
 
 	var data lrcResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("lrclib parse error: %w", err)
+		return nil, &FetchError{Kind: ErrBadResponse, Err: fmt.Errorf("lrclib parse error: %w", err)}
 	}
 
 	result := &Result{Plain: data.PlainLyrics}
