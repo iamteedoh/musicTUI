@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/iamteedoh/musicTUI/internal/config"
 	"github.com/iamteedoh/musicTUI/internal/importbackend"
+	"github.com/iamteedoh/musicTUI/internal/lyrics"
 	"github.com/iamteedoh/musicTUI/internal/model"
 	"github.com/iamteedoh/musicTUI/internal/theme"
 	"github.com/iamteedoh/musicTUI/internal/tui/components"
@@ -537,6 +538,118 @@ func TestSettingsThemeCyclingAppliesAndPersists(t *testing.T) {
 // switch panels. Both directions of that contract are load-bearing — the
 // global handlers run first and used to swallow the keys before Settings
 // ever saw them.
+// A failed lyrics fetch must reach the panel as short plain-language text
+// with retry/dismiss affordances — not a raw Go error in the status line,
+// and not a "Loading lyrics..." that never resolves (MUS-33).
+func TestLyricsErrorIsPanelOnlyAndScopedToTrack(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	track := model.Track{ID: "t1", Name: "Song"}
+	app.playback.Track = &track
+	app.lyrics.Loading = true
+	app.lyrics.TrackID = "t1"
+
+	// A stale failure from the previous track is dropped outright.
+	m, _ := app.Update(LyricsErrorMsg{TrackID: "t0", Message: "Couldn't reach the lyrics service"})
+	app = m.(App)
+	if app.lyrics.Error != "" {
+		t.Fatal("a stale track's lyrics error clobbered the current track's panel")
+	}
+
+	m, _ = app.Update(LyricsErrorMsg{TrackID: "t1", Message: "Couldn't reach the lyrics service"})
+	app = m.(App)
+	if app.lyrics.Error != "Couldn't reach the lyrics service" {
+		t.Fatalf("lyrics.Error = %q, want the friendly message", app.lyrics.Error)
+	}
+	if app.lyrics.Loading {
+		t.Fatal("panel stuck on Loading after the fetch failed")
+	}
+	if app.status != "" {
+		t.Fatalf("a lyrics failure leaked into the status line: %q", app.status)
+	}
+
+	// Stale successful results are dropped the same way.
+	app.lyrics.TrackID = "t2"
+	m, _ = app.Update(LyricsLoadedMsg{TrackID: "t1", Result: &lyrics.Result{Plain: "old words"}})
+	app = m.(App)
+	if app.lyrics.PlainText == "old words" {
+		t.Fatal("a stale track's lyrics result clobbered the current track's panel")
+	}
+}
+
+// The error banner owns exactly ctrl+r (retry) and esc (dismiss) while
+// visible. The playback letters must keep working — the global key switch
+// has swallowed view keys twice before (MUS-12, MUS-32) — and a banner that
+// isn't rendered must not eat esc.
+func TestLyricsErrorBannerKeys(t *testing.T) {
+	app := NewApp(config.Config{}, "", "test")
+	app.onboard.Close()
+	track := model.Track{ID: "t1", Name: "Song"}
+	app.playback.Track = &track
+	app.lyrics.TrackID = "t1"
+	app.lyrics.Error = "Couldn't reach the lyrics service"
+	app.view = model.ViewHome // inline lyrics panel is visible (showLyrics defaults on)
+
+	// r while the banner is up still cycles repeat — not stolen for retry.
+	repeatBefore := app.queue.Repeat
+	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app = m.(App)
+	if app.queue.Repeat == repeatBefore {
+		t.Fatal("r with the lyrics banner visible no longer cycles repeat mode")
+	}
+
+	// ctrl+r retries: banner cleared, loading again, fetch command issued.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	app = m.(App)
+	if app.lyrics.Error != "" || !app.lyrics.Loading {
+		t.Fatalf("ctrl+r: Error = %q, Loading = %v — want cleared and loading", app.lyrics.Error, app.lyrics.Loading)
+	}
+	if cmd == nil {
+		t.Fatal("ctrl+r did not return a refetch command")
+	}
+
+	// Fail again, esc dismisses to the quiet empty state.
+	m, _ = app.Update(LyricsErrorMsg{TrackID: "t1", Message: "Couldn't reach the lyrics service"})
+	app = m.(App)
+	viewBefore := app.view
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.lyrics.Error != "" {
+		t.Fatal("esc did not dismiss the lyrics error banner")
+	}
+	if app.view != viewBefore {
+		t.Fatal("dismissing the banner also navigated the view")
+	}
+
+	// Hidden banner (inline lyrics toggled off) must not eat keys: esc falls
+	// through to whatever the view does, and the error text stays put.
+	app.lyrics.Error = "Couldn't reach the lyrics service"
+	app.showLyrics = false
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.lyrics.Error == "" {
+		t.Fatal("esc dismissed a banner that was not on screen")
+	}
+
+	// In the full Lyrics view the banner renders regardless of the inline
+	// toggle: first esc dismisses, second esc does the view's normal back.
+	app.view = model.ViewLyrics
+	app.focus = model.FocusContent
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.lyrics.Error != "" {
+		t.Fatal("esc in the Lyrics view did not dismiss the banner first")
+	}
+	if app.focus != model.FocusContent {
+		t.Fatal("the dismissing esc also moved focus")
+	}
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.focus != model.FocusSidebar {
+		t.Fatal("esc after dismissal lost its normal back-to-sidebar behavior")
+	}
+}
+
 func TestSettingsKeysDoNotLeakToGlobalBindings(t *testing.T) {
 	config.SetDir(t.TempDir())
 	t.Cleanup(func() { config.SetDir("") })
