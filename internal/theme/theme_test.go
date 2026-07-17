@@ -2,7 +2,11 @@ package theme
 
 import (
 	"math"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/lucasb-eyer/go-colorful"
 )
 
 // testLinear/testLuma/contrastRatio are an independent WCAG oracle — kept
@@ -273,5 +277,273 @@ func TestResolveProbeBeatsColorFgBg(t *testing.T) {
 	t.Setenv("COLORFGBG", "15;0") // env claims dark
 	if got := Resolve(Auto, "#FFFFFF").Name; got != "Catppuccin Latte" {
 		t.Fatalf("Resolve(auto, #FFFFFF) = %q, want the probe's light answer to win", got)
+	}
+}
+
+// ── MUS-36: background contrast adaptation ──────────────────────────────────
+
+// Realistic dark terminal backgrounds that are NOT pure black — the case the
+// fixed dark palette rendered illegibly (the reported Ghostty-navy bug).
+var navyBackgrounds = []string{
+	"#0D1117", // GitHub dark
+	"#0F172A", // slate navy
+	"#111318", // near-black blue-gray
+	"#1A1B26", // Tokyo Night
+	"#1D1F21", // Ghostty/iTerm default-ish
+	"#1E2C48", // deep navy
+	"#282C34", // One Dark
+	"#2E3440", // Nord's own bg
+}
+
+func mustColor(hex string) colorful.Color {
+	c, err := colorful.Hex(strings.ToLower(hex))
+	if err != nil {
+		panic("bad hex in test: " + hex)
+	}
+	return c
+}
+
+// A terminal dark or light enough that every role already clears its floor must
+// resolve BYTE-FOR-BYTE to the raw tier palette: adaptation is a pure no-op, so
+// existing near-black (and near-white) users see zero change.
+func TestResolveIsNoOpWhenPaletteAlreadyLegible(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	if got := Resolve(Auto, "#000000"); !reflect.DeepEqual(got, Nord()) {
+		t.Errorf("Resolve(auto, #000000) must equal raw Nord() byte-for-byte;\n got %+v\nwant %+v", got, Nord())
+	}
+	if got := Resolve(Auto, "#FFFFFF"); !reflect.DeepEqual(got, CatppuccinLatte()) {
+		t.Errorf("Resolve(auto, #FFFFFF) must equal raw Catppuccin Latte() byte-for-byte")
+	}
+}
+
+// A silent terminal (no OSC 11 answer) or a garbage background must fall through
+// to today's behavior — never a half-adapted palette.
+func TestResolveUnknownBackgroundFallsBack(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, bg := range []string{"", "not-a-color", "#12345"} {
+		if got := Resolve(Auto, bg); !reflect.DeepEqual(got, Nord()) {
+			t.Errorf("Resolve(auto, %q) must fall back to raw Nord()", bg)
+		}
+	}
+}
+
+// The reported bug: muted text (track numbers, durations, column headers) must
+// be legible on a navy terminal. Every body-text role is held to its floor,
+// measured by the test's INDEPENDENT WCAG oracle so the adapted colors are
+// checked by a second implementation.
+func TestResolveMutedIsLegibleOnNavy(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, bg := range navyBackgrounds {
+		th := Resolve(Auto, bg)
+		checks := []struct {
+			role string
+			hex  string
+			min  float64
+		}{
+			{"Fg", string(th.Fg), 4.5},
+			{"FgDim", string(th.FgDim), 3.0},
+			{"FgMuted", string(th.FgMuted), 2.7},
+		}
+		for _, c := range checks {
+			// Small slack absorbs 8-bit rounding at the exact floor.
+			if got := contrastRatio(c.hex, bg); got < c.min-0.02 {
+				t.Errorf("Resolve(auto, %s): %s %s contrast %.2f, want >= %.2f",
+					bg, c.role, c.hex, got, c.min)
+			}
+		}
+	}
+}
+
+// Adaptation must never invert the visible text hierarchy on ANY background,
+// including the compressed L* 38–65 mid band where roles crowd together.
+func TestResolveKeepsHierarchyOnEveryBackground(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	bgs := append([]string{}, navyBackgrounds...)
+	// mid-grays, light-grays (where the light muted floor once chased an
+	// unreachable target), a saturated bright bg, and the near-white extremes.
+	bgs = append(bgs, "#3B3B3B", "#5B5B5B", "#6E6E6E", "#7C7C7C", "#909090",
+		"#B0B0B0", "#B2B2B2", "#C0C0C0", "#00C000", "#FDF6E3", "#FFFFFF")
+	for _, bg := range bgs {
+		th := Resolve(Auto, bg)
+		fg := contrastRatio(string(th.Fg), bg)
+		dim := contrastRatio(string(th.FgDim), bg)
+		muted := contrastRatio(string(th.FgMuted), bg)
+		if !(fg > dim && dim > muted) {
+			t.Errorf("Resolve(auto, %s): hierarchy broken — Fg %.2f > FgDim %.2f > FgMuted %.2f",
+				bg, fg, dim, muted)
+		}
+	}
+}
+
+// Cross-tier stress: every EXPLICIT theme, on both a dark and a light terminal,
+// must keep its body text legible and the Fg>FgDim>FgMuted order intact — even
+// when the palette's own luminance order is inverted for that terminal (a light
+// theme on a dark terminal, which is what the reported github_light bug was).
+func TestResolveExplicitThemesLegibleAndOrderedCrossTier(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, key := range AllThemes {
+		for _, bg := range []string{"#1A1B26", "#0D1117", "#FFFFFF", "#EFF1F5"} {
+			th := Resolve(key, bg)
+			fg := contrastRatio(string(th.Fg), bg)
+			dim := contrastRatio(string(th.FgDim), bg)
+			muted := contrastRatio(string(th.FgMuted), bg)
+			if fg < 4.5-0.05 || dim < 3.0-0.05 || muted < 2.7-0.05 {
+				t.Errorf("%s on %s: below floors — Fg %.2f FgDim %.2f FgMuted %.2f", key, bg, fg, dim, muted)
+			}
+			if !(fg > dim && dim > muted) {
+				t.Errorf("%s on %s: hierarchy broken — Fg %.2f > FgDim %.2f > FgMuted %.2f", key, bg, fg, dim, muted)
+			}
+		}
+	}
+}
+
+// The mid-gray win adaptation has over a fixed-palette retune: a true mid-tone
+// terminal routes to the medium tier and its muted role is lifted to legibility
+// too — something no single fixed value can do across the whole band.
+func TestResolveMutedIsLegibleOnMidGray(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, bg := range []string{"#6E6E6E", "#7C7C7C", "#909090"} {
+		th := Resolve(Auto, bg)
+		if got := contrastRatio(string(th.FgMuted), bg); got < 2.7-0.02 {
+			t.Errorf("Resolve(auto, %s): FgMuted contrast %.2f, want >= 2.7", bg, got)
+		}
+	}
+}
+
+// An explicitly-chosen theme keeps its identity (the user picked WHICH palette)
+// but is still contrast-adapted to the terminal so its text stays readable — a
+// no-op when it already matches, a rescue when it doesn't (MUS-36).
+func TestResolveExplicitThemeAdaptsButKeepsIdentity(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+
+	// Matching terminal → returned byte-for-byte (the pick is honored exactly).
+	if got := Resolve("nord", "#000000"); !reflect.DeepEqual(got, Nord()) {
+		t.Error("explicit nord on pure black must equal raw Nord() — already legible, no change")
+	}
+	if got := Resolve("github_light", "#FFFFFF"); !reflect.DeepEqual(got, GitHubLight()) {
+		t.Error("explicit github_light on white must equal raw GitHubLight() — already legible")
+	}
+
+	// The reported case: a light theme on a DARK terminal. Identity is kept, but
+	// its near-black body text is lifted to readable contrast.
+	dark := "#1A1B26"
+	got := Resolve("github_light", dark)
+	if got.Name != "GitHub Light" || got.Tier != TierLight {
+		t.Fatalf("explicit theme lost its identity: got %q (%s)", got.Name, got.Tier)
+	}
+	if c := contrastRatio(string(got.Fg), dark); c < 4.5-0.05 {
+		t.Errorf("github_light Fg on a dark terminal has contrast %.2f, want >= 4.5 (rescued)", c)
+	}
+	if c := contrastRatio(string(got.FgMuted), dark); c < 2.7-0.05 {
+		t.Errorf("github_light FgMuted on a dark terminal has contrast %.2f, want >= 2.7 (rescued)", c)
+	}
+	if raw := GitHubLight(); string(got.Fg) == string(raw.Fg) {
+		t.Error("github_light Fg was not adapted on a dark terminal — text would be invisible")
+	}
+
+	// An explicit DARK theme on a navy terminal also gets the muted-text rescue.
+	if c := contrastRatio(string(Resolve("nord", "#1E2C48").FgMuted), "#1E2C48"); c < 2.7-0.05 {
+		t.Errorf("explicit nord FgMuted on navy has contrast %.2f, want >= 2.7 (rescued)", c)
+	}
+}
+
+// raiseContrast contract, verified on the 8-bit color actually emitted:
+// already-passing input is returned unchanged; a failing input is lifted to at
+// least the floor after rounding; an impossible target is driven to a pole.
+func TestRaiseContrastReachesFloorOnEmittedColor(t *testing.T) {
+	navy := mustColor("#1E2C48")
+
+	// Nord FgMuted starts ~1.9 on this navy → must reach 2.7 after rounding.
+	adj := raiseContrast(mustColor("#4C566A"), navy, 2.7)
+	if got := wcagContrast(mustColor(adj.Hex()), navy); got < 2.7 {
+		t.Errorf("raiseContrast: emitted contrast %.3f, want >= 2.7", got)
+	}
+
+	// An already-legible role is returned byte-identical (no needless shift).
+	fg := mustColor("#d8dee9")
+	if out := raiseContrast(fg, navy, 4.5); out.Hex() != fg.Hex() {
+		t.Errorf("raiseContrast shifted an already-passing color: %s -> %s", fg.Hex(), out.Hex())
+	}
+
+	// Impossible target (far above any achievable contrast) → a pure pole.
+	gray := mustColor("#7C7C7C")
+	pole := raiseContrast(gray, gray, 99)
+	if h := pole.Hex(); h != "#000000" && h != "#ffffff" {
+		t.Errorf("raiseContrast: unreachable target should return a pole, got %s", h)
+	}
+}
+
+// Dark terminals whose background sits close to the palette's selection block,
+// where the highlight fades into the surrounding rows (the follow-up MUS-36
+// asked to fix alongside the muted-text bug).
+var midDarkBackgrounds = []string{"#282C34", "#303540", "#383E48", "#3B4048"}
+
+// On a mid-dark terminal the selection block must be re-seated so it (a) stands
+// out from the terminal background at least as well as the raw palette would and
+// clears a visible-separation floor, and (b) keeps the primary accent selection
+// text legible.
+func TestResolveSelectionBlockStaysVisibleOnMidDark(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	rawSB := string(Nord().SurfaceBright)
+	rawAccent := string(Nord().Accent)
+	for _, bg := range midDarkBackgrounds {
+		th := Resolve(Auto, bg)
+		sepRaw := contrastRatio(rawSB, bg)
+		sepNew := contrastRatio(string(th.SurfaceBright), bg)
+		if sepNew < sepRaw-0.01 {
+			t.Errorf("bg %s: adapted selection block sep %.2f is worse than raw %.2f", bg, sepNew, sepRaw)
+		}
+		if sepNew < 1.45 {
+			t.Errorf("bg %s: selection block sep %.2f still fades (want >= ~1.5)", bg, sepNew)
+		}
+		if acc := contrastRatio(rawAccent, string(th.SurfaceBright)); acc < 3.0-0.05 {
+			t.Errorf("bg %s: accent text on the selection block dropped to %.2f (want >= 3.0)", bg, acc)
+		}
+	}
+}
+
+// A dark terminal whose selection block is already distinct (near-black, and the
+// reported Ghostty navy) must leave SurfaceBright untouched — no needless shift.
+func TestResolveSelectionBlockUntouchedWhenAlreadyDistinct(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, bg := range []string{"#000000", "#0D1117", "#1D1F21", "#1A1B26"} {
+		if got, want := string(Resolve(Auto, bg).SurfaceBright), string(Nord().SurfaceBright); got != want {
+			t.Errorf("bg %s: SurfaceBright changed to %s, want the raw %s (already distinct)", bg, got, want)
+		}
+	}
+}
+
+// The light tier's selection block is deliberately low-contrast and must never
+// be adapted here (doing so once inverted a light block to near-black on white).
+func TestResolveLightTierSelectionBlockUntouched(t *testing.T) {
+	t.Setenv("COLORFGBG", "")
+	for _, bg := range []string{"#FFFFFF", "#EFF1F5", "#E0E0E0", "#D8DCE4"} {
+		if got, want := string(Resolve(Auto, bg).SurfaceBright), string(CatppuccinLatte().SurfaceBright); got != want {
+			t.Errorf("bg %s (light tier): SurfaceBright changed to %s, want the raw %s", bg, got, want)
+		}
+	}
+}
+
+// fitSelectionSurface contract: an already-distinct block is returned unchanged;
+// a faded one is re-seated to clear the separation and text floors it can.
+func TestFitSelectionSurface(t *testing.T) {
+	accent := mustColor("#88c0d0") // Nord accent
+	dim := mustColor("#5e81ac")    // Nord accentDim
+	texts := []textReq{{accent, 3.0}, {dim, 2.3}}
+	sb := mustColor("#3b4252")
+
+	// Already distinct against near-black → unchanged.
+	if got := fitSelectionSurface(sb, mustColor("#000000"), texts, 1.5); got.Hex() != sb.Hex() {
+		t.Errorf("distinct block was shifted: %s -> %s", sb.Hex(), got.Hex())
+	}
+	// Faded against a mid-dark bg → re-seated to clear the separation floor with
+	// accent text still legible.
+	bg := mustColor("#383e48")
+	got := fitSelectionSurface(sb, bg, texts, 1.5)
+	if wcagContrast(mustColor(got.Hex()), bg) < 1.45 {
+		t.Errorf("re-seated block sep %.2f, want >= ~1.5", wcagContrast(mustColor(got.Hex()), bg))
+	}
+	if wcagContrast(accent, mustColor(got.Hex())) < 3.0 {
+		t.Errorf("accent on re-seated block %.2f, want >= 3.0", wcagContrast(accent, mustColor(got.Hex())))
 	}
 }
