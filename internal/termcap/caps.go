@@ -42,9 +42,14 @@ type Caps struct {
 }
 
 // RawEscaped renders Raw with control bytes shown as ^[ etc., safe to print.
-func (c Caps) RawEscaped() string {
+func (c Caps) RawEscaped() string { return EscapeControls(c.Raw) }
+
+// EscapeControls renders s with control bytes shown as ^[ etc., safe to print.
+// Terminal replies are control-sequence soup; this is how `--caps` and the
+// artwork probe show them as ground truth without re-triggering the terminal.
+func EscapeControls(s string) string {
 	var b strings.Builder
-	for _, r := range c.Raw {
+	for _, r := range s {
 		switch {
 		case r == 0x1b:
 			b.WriteString("^[")

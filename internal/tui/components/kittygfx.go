@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/png"
 	"os"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Kitty graphics protocol — Unicode placeholder rendering.
@@ -43,6 +42,33 @@ var rowColDiacritics = []rune{
 // maxKittyGridDim is the largest placeholder grid we can address per axis.
 func maxKittyGridDim() int { return len(rowColDiacritics) }
 
+// kittyGridSize fits a srcW×srcH image into a charW×charH box of character
+// cells using the 1-wide × 2-tall cell aspect every character renderer here
+// assumes, capped by the diacritic table so each cell stays addressable.
+// Shared by renderPlaceholders and the artwork probe, so the probe asks the
+// terminal for exactly the grid the app would.
+func kittyGridSize(srcW, srcH, charW, charH int) (cols, rows int) {
+	scale := float64(srcW) / float64(charW)
+	if s := float64(srcH) / float64(charH*2); s > scale {
+		scale = s
+	}
+	cols = int(float64(srcW) / scale)
+	rows = int(float64(srcH) / scale / 2)
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if max := maxKittyGridDim(); cols > max {
+		cols = max
+	}
+	if max := maxKittyGridDim(); rows > max {
+		rows = max
+	}
+	return cols, rows
+}
+
 // ArtworkStyle selects how the artwork panel renders the cover.
 type ArtworkStyle int
 
@@ -65,6 +91,21 @@ const (
 	StyleITerm2
 )
 
+// String names the style the way MUSICTUI_ARTWORK spells it.
+func (s ArtworkStyle) String() string {
+	switch s {
+	case StyleBraille:
+		return "braille"
+	case StyleKitty:
+		return "kitty"
+	case StyleSixel:
+		return "sixel"
+	case StyleITerm2:
+		return "iterm2"
+	}
+	return "blocks"
+}
+
 // DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
 // detection: "kitty", "sixel" and "iterm2" force the respective pixel
 // protocols, "blocks" and "braille" force the character-art styles.
@@ -75,21 +116,31 @@ const (
 // silently fall back to block art (MUS-20). The env heuristic below is kept
 // only as a fallback for when the probe couldn't run (e.g. not a TTY).
 func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
+	style, reason := detectArtworkStyle(kittyProbe, sixelProbe)
+	artworkDebugf("style: %s — %s (probe kitty=%t sixel=%t; lipgloss profile=%s)",
+		style, reason, kittyProbe, sixelProbe, ColorProfileName())
+	return style
+}
+
+// detectArtworkStyle is DetectArtworkStyle's decision tree, with the reason
+// each branch was taken — that reason is exactly what an artwork bug report
+// needs first, so the debug log records it.
+func detectArtworkStyle(kittyProbe, sixelProbe bool) (ArtworkStyle, string) {
 	switch strings.ToLower(os.Getenv("MUSICTUI_ARTWORK")) {
 	case "blocks":
-		return StyleBlocks
+		return StyleBlocks, "MUSICTUI_ARTWORK override"
 	case "braille":
-		return StyleBraille
+		return StyleBraille, "MUSICTUI_ARTWORK override"
 	case "kitty", "hires":
-		return StyleKitty
+		return StyleKitty, "MUSICTUI_ARTWORK override"
 	case "sixel":
-		return StyleSixel
+		return StyleSixel, "MUSICTUI_ARTWORK override"
 	case "iterm2", "iterm":
-		return StyleITerm2
+		return StyleITerm2, "MUSICTUI_ARTWORK override"
 	}
 	// Inside tmux the APC/DCS escapes would need passthrough wrapping; use blocks.
 	if os.Getenv("TMUX") != "" {
-		return StyleBlocks
+		return StyleBlocks, "tmux (no APC/DCS passthrough)"
 	}
 	// iTerm2 must be identified before the kitty probe is consulted: it
 	// answers a=q with ";OK" (≥ 3.6) but renders no Unicode placeholders, so
@@ -99,32 +150,32 @@ func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
 	// the server accepts LC_* (a stripped environment falls through to the
 	// probe and, like Konsole over ssh, cannot be told apart from kitty).
 	if isITerm2() {
-		return StyleITerm2
+		return StyleITerm2, "iTerm2 named itself"
 	}
 	// Authoritative: the terminal told us it supports kitty graphics — but only
 	// our renderer's dialect of it counts (see kittyPlaceholders).
 	if kittyProbe && kittyPlaceholders() {
-		return StyleKitty
+		return StyleKitty, "terminal answered the kitty graphics query"
 	}
 	// Next best real-pixel path. Preferred over kitty's env heuristic below
 	// because it, too, came from the terminal itself rather than a guess.
 	if sixelProbe {
-		return StyleSixel
+		return StyleSixel, "terminal advertised sixel (DA1 attribute 4)"
 	}
 	// Fallback heuristic when the probe couldn't run (redirected output, etc.).
 	term := os.Getenv("TERM")
 	prog := os.Getenv("TERM_PROGRAM")
 	if !kittyPlaceholders() {
-		return StyleBlocks
+		return StyleBlocks, "no probe answer; terminal denylisted for placeholders"
 	}
 	if strings.Contains(term, "kitty") || os.Getenv("KITTY_WINDOW_ID") != "" {
-		return StyleKitty
+		return StyleKitty, "no probe answer; kitty env heuristic"
 	}
 	if strings.Contains(term, "ghostty") || strings.EqualFold(prog, "ghostty") ||
 		os.Getenv("GHOSTTY_RESOURCES_DIR") != "" {
-		return StyleKitty
+		return StyleKitty, "no probe answer; ghostty env heuristic"
 	}
-	return StyleBlocks
+	return StyleBlocks, "no probe answer, no env match — universal fallback"
 }
 
 // kittyPlaceholders reports whether the terminal can be expected to implement
@@ -172,15 +223,47 @@ func isITerm2() bool {
 	return strings.EqualFold(os.Getenv("LC_TERMINAL"), "iTerm2")
 }
 
+// kittyImageID derives the kitty image id for a cover URL. Masked to 24 bits
+// because the id rides in the placeholder cells' foreground color, which
+// carries exactly 24; 0 is the protocol's "no id", so it maps to 1.
+func kittyImageID(url string) uint32 {
+	id := crc32.ChecksumIEEE([]byte(url)) & 0xFFFFFF
+	if id == 0 {
+		id = 1
+	}
+	return id
+}
+
+// kittyTxStats describes a transmit's actual size on the wire — for the
+// artwork debug log and the probe, because a per-cover size or quota limit in
+// the terminal presents as "some albums render, some don't" (MUS-34).
+type kittyTxStats struct {
+	PNGBytes int
+	B64Chars int
+	Chunks   int
+}
+
 // kittyTransmit encodes img as PNG and returns the chunked APC escape
 // sequence that stores it in the terminal under the given image id.
-// q=2 suppresses terminal responses (they would land in Bubble Tea's input).
-func kittyTransmit(id uint32, img image.Image) (string, error) {
+//
+// quiet is the protocol's q key. The app renders with q=2 — suppress the OK
+// and any ERROR response alike, because a reply would land in Bubble Tea's
+// input stream and be parsed as keystrokes — which means a terminal that
+// rejects a cover rejects it silently (MUS-34). The artwork probe replays the
+// same transmit with quiet=0 (the key is omitted; verbose is the default)
+// outside Bubble Tea, precisely to hear that rejection.
+func kittyTransmit(id uint32, img image.Image, quiet int) (string, kittyTxStats, error) {
 	var pngBuf bytes.Buffer
 	if err := png.Encode(&pngBuf, img); err != nil {
-		return "", err
+		return "", kittyTxStats{}, err
 	}
 	payload := base64.StdEncoding.EncodeToString(pngBuf.Bytes())
+	stats := kittyTxStats{PNGBytes: pngBuf.Len(), B64Chars: len(payload)}
+
+	quietKey := ""
+	if quiet != 0 {
+		quietKey = fmt.Sprintf("q=%d,", quiet)
+	}
 
 	const chunkSize = 4096
 	var b strings.Builder
@@ -197,19 +280,25 @@ func kittyTransmit(id uint32, img image.Image) (string, error) {
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(&b, "\x1b_Ga=t,q=2,f=100,i=%d,m=%d;%s\x1b\\", id, more, chunk)
+			fmt.Fprintf(&b, "\x1b_Ga=t,%sf=100,i=%d,m=%d;%s\x1b\\", quietKey, id, more, chunk)
 			first = false
 		} else {
-			fmt.Fprintf(&b, "\x1b_Gq=2,m=%d;%s\x1b\\", more, chunk)
+			fmt.Fprintf(&b, "\x1b_G%sm=%d;%s\x1b\\", quietKey, more, chunk)
 		}
+		stats.Chunks++
 	}
-	return b.String(), nil
+	return b.String(), stats, nil
 }
 
 // kittyPlacement creates (or replaces) the virtual placement binding image
 // id to a cols×rows cell rectangle for Unicode-placeholder rendering.
-func kittyPlacement(id uint32, cols, rows int) string {
-	return fmt.Sprintf("\x1b_Ga=p,q=2,U=1,i=%d,c=%d,r=%d\x1b\\", id, cols, rows)
+// quiet as in kittyTransmit: the app passes 2, the probe 0.
+func kittyPlacement(id uint32, cols, rows int, quiet int) string {
+	quietKey := ""
+	if quiet != 0 {
+		quietKey = fmt.Sprintf("q=%d,", quiet)
+	}
+	return fmt.Sprintf("\x1b_Ga=p,%sU=1,i=%d,c=%d,r=%d\x1b\\", quietKey, id, cols, rows)
 }
 
 // kittyDelete frees the image data and any placements for id.
@@ -220,13 +309,24 @@ func kittyDelete(id uint32) string {
 // kittyPlaceholderRow builds one row of the placeholder grid: `cols` cells of
 // U+10EEEE, each tagged with its row/column diacritics, colored with the
 // 24-bit image id so the terminal knows which image to draw.
+//
+// The foreground color carries the image id: 24 bits packed as R, G, B.
+// We emit the SGR escape directly rather than routing through lipgloss →
+// termenv → go-colorful, which converts hex → float64 via (1.0/255.0) →
+// uint8 via (*255). Because 1/255 is not exactly representable in binary64,
+// 24 of 256 byte values round-trip to b-1, corrupting the id emitted to the
+// terminal and causing it to look up an image it never received (MUS-34).
 func kittyPlaceholderRow(id uint32, row, cols int) string {
-	fg := lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", (id>>16)&0xff, (id>>8)&0xff, id&0xff))
-	var b strings.Builder
+	r := (id >> 16) & 0xff
+	g := (id >> 8) & 0xff
+	b := id & 0xff
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%dm", r, g, b)
 	for col := 0; col < cols; col++ {
-		b.WriteRune(placeholderRune)
-		b.WriteRune(rowColDiacritics[row])
-		b.WriteRune(rowColDiacritics[col])
+		sb.WriteRune(placeholderRune)
+		sb.WriteRune(rowColDiacritics[row])
+		sb.WriteRune(rowColDiacritics[col])
 	}
-	return lipgloss.NewStyle().Foreground(fg).Render(b.String())
+	sb.WriteString("\x1b[0m")
+	return sb.String()
 }
