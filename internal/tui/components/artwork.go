@@ -2,7 +2,6 @@ package components
 
 import (
 	"fmt"
-	"hash/crc32"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -256,6 +255,9 @@ func (a *Artwork) TakeOOB() string {
 	defer a.mu.Unlock()
 	s := a.oob.String()
 	a.oob.Reset()
+	if s != "" {
+		artworkDebugf("kitty: flushing %d bytes of graphics escapes to the terminal", len(s))
+	}
 	return s
 }
 
@@ -371,50 +373,35 @@ func (a *Artwork) renderPlaceholders(width, height int) string {
 
 	// Same 1-wide × 2-tall cell aspect math as the block renderer, capped by
 	// the diacritic table so every cell stays addressable.
-	charW := width - 2
-	charH := height
-	scale := float64(srcW) / float64(charW)
-	if s := float64(srcH) / float64(charH*2); s > scale {
-		scale = s
-	}
-	cellsW := int(float64(srcW) / scale)
-	cellsH := int(float64(srcH) / scale / 2)
-	if cellsW < 1 {
-		cellsW = 1
-	}
-	if cellsH < 1 {
-		cellsH = 1
-	}
-	if max := maxKittyGridDim(); cellsW > max {
-		cellsW = max
-	}
-	if max := maxKittyGridDim(); cellsH > max {
-		cellsH = max
-	}
+	cellsW, cellsH := kittyGridSize(srcW, srcH, width-2, height)
 
-	id := crc32.ChecksumIEEE([]byte(a.imageURL)) & 0xFFFFFF
-	if id == 0 {
-		id = 1
-	}
+	id := kittyImageID(a.imageURL)
 
 	// Reconcile terminal-side state: transmit on a new image, re-place on a
 	// grid-size change. Cache hits in the app's view cache skip this whole
 	// function, so escapes are only queued when something actually changed.
 	if a.transmittedURL != a.imageURL {
 		if a.kittyID != 0 && a.kittyID != id {
+			artworkDebugf("kitty: delete id=%d (cover changed)", a.kittyID)
 			a.oob.WriteString(kittyDelete(a.kittyID))
 		}
-		tx, err := kittyTransmit(id, a.img)
+		tx, stats, err := kittyTransmit(id, a.img, 2)
 		if err != nil {
+			// The "chunky block art" half of MUS-34: nothing reaches the
+			// terminal, the panel deliberately falls back to character art.
+			artworkDebugf("kitty: png encode FAILED for %s — falling back to block art: %v", a.imageURL, err)
 			return a.renderBlocks(width, height)
 		}
+		artworkDebugf("kitty: transmit id=%d src=%dx%d grid=%dx%d png=%dB b64=%d chunks=%d url=%s",
+			id, srcW, srcH, cellsW, cellsH, stats.PNGBytes, stats.B64Chars, stats.Chunks, a.imageURL)
 		a.oob.WriteString(tx)
-		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
+		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH, 2))
 		a.kittyID = id
 		a.transmittedURL = a.imageURL
 		a.placedCols, a.placedRows = cellsW, cellsH
 	} else if a.placedCols != cellsW || a.placedRows != cellsH {
-		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH))
+		artworkDebugf("kitty: re-place id=%d grid=%dx%d (was %dx%d)", id, cellsW, cellsH, a.placedCols, a.placedRows)
+		a.oob.WriteString(kittyPlacement(id, cellsW, cellsH, 2))
 		a.placedCols, a.placedRows = cellsW, cellsH
 	}
 

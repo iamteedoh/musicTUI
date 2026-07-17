@@ -441,6 +441,16 @@ Override auto-detection with `MUSICTUI_ARTWORK` when launching:
 
 Inside `tmux`, both pixel paths are disabled (the escapes would need passthrough wrapping) and character art is used.
 
+### Debugging artwork
+
+Two tools exist for the "one specific cover never renders" class of problem (seen in Ghostty's kitty tier, where most covers work but the odd one stays blank):
+
+- **`MUSICTUI_ARTWORK_DEBUG=1 musicTUI`** — logs every artwork decision to `<cache>/musicTUI/artwork-debug.log` (set the variable to a file path to log elsewhere; `musicTUI --caps` prints the active destination). The log records which renderer was chosen and why, and for every kitty transmit: the cover's URL, image id, PNG/base64 size, chunk count and placement grid — plus any encode failure that fell back to block art. The app can't show any of this on screen: it *is* the screen.
+
+- **`musicTUI --artwork-probe [FILE|URL]`** — the terminal's side of the story. The app must send kitty graphics escapes with responses suppressed (`q=2` — a reply would land in the input stream as keystrokes), so a terminal that rejects a cover rejects it *silently*. The probe replays the exact same pipeline — same PNG encode, chunking, image id and virtual placement — outside the TUI with responses enabled, and prints the terminal's verdict (`OK`, or the rejection reason like `EFBIG`/`ENODATA`). On success it also prints a real placeholder grid, so you can tell "transmit rejected" apart from "transmit fine but placeholders don't render". With no argument it sends a generated cover-sized test image, which separates "this terminal's kitty pipeline is broken" from "this particular cover is rejected".
+
+The two compose: run the app with `MUSICTUI_ARTWORK_DEBUG=1`, play the track whose cover is missing, copy its URL out of the log, then `musicTUI --artwork-probe <that URL>` in the same terminal.
+
 ---
 
 ## Audio Visualizer
