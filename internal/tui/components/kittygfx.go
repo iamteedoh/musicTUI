@@ -59,11 +59,15 @@ const (
 	// terminals that don't implement kitty graphics — Windows Terminal,
 	// WezTerm, xterm, mintty, foot, Konsole (MUS-29).
 	StyleSixel
+	// StyleITerm2: the actual image via iTerm2's native OSC 1337 File=
+	// protocol, sized in cells. iTerm2 answers the kitty probe but renders
+	// no placeholders, and reports no usable cell size for sixel (MUS-30).
+	StyleITerm2
 )
 
 // DetectArtworkStyle picks the artwork renderer. MUSICTUI_ARTWORK overrides
-// detection: "kitty" forces pixel graphics, "blocks" and "braille" force the
-// respective character-art styles.
+// detection: "kitty", "sixel" and "iterm2" force the respective pixel
+// protocols, "blocks" and "braille" force the character-art styles.
 //
 // kittyProbe is the result of querying the terminal directly for kitty
 // graphics support (see internal/termcap). It is the authoritative signal —
@@ -80,10 +84,22 @@ func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
 		return StyleKitty
 	case "sixel":
 		return StyleSixel
+	case "iterm2", "iterm":
+		return StyleITerm2
 	}
 	// Inside tmux the APC/DCS escapes would need passthrough wrapping; use blocks.
 	if os.Getenv("TMUX") != "" {
 		return StyleBlocks
+	}
+	// iTerm2 must be identified before the kitty probe is consulted: it
+	// answers a=q with ";OK" (≥ 3.6) but renders no Unicode placeholders, so
+	// trusting the probe leaves a blank panel (MUS-30). Its native inline
+	// protocol is sized in cells, so it needs no probe result at all. Locally
+	// iTerm2 always sets TERM_PROGRAM; over ssh it forwards LC_TERMINAL when
+	// the server accepts LC_* (a stripped environment falls through to the
+	// probe and, like Konsole over ssh, cannot be told apart from kitty).
+	if isITerm2() {
+		return StyleITerm2
 	}
 	// Authoritative: the terminal told us it supports kitty graphics — but only
 	// our renderer's dialect of it counts (see kittyPlaceholders).
@@ -122,14 +138,38 @@ func DetectArtworkStyle(kittyProbe, sixelProbe bool) ArtworkStyle {
 // owns those cells — and duplicated on every re-placement and resize (MUS-29).
 //
 // There is no capability query for placeholders, so the only signal is the
-// terminal naming itself. Konsole exports KONSOLE_VERSION. This is a denylist
-// rather than an allowlist on purpose: env sniffing misses Ghostty on Linux,
-// which is what made MUS-20 fall back to block art in the first place.
+// terminal naming itself. Konsole exports KONSOLE_VERSION; iTerm2 sets
+// TERM_PROGRAM (and is caught earlier by DetectArtworkStyle anyway — listed
+// here too so no future reordering can hand it placeholders). This is a
+// denylist rather than an allowlist on purpose: env sniffing misses Ghostty
+// on Linux, which is what made MUS-20 fall back to block art in the first
+// place.
 func kittyPlaceholders() bool {
 	if os.Getenv("KONSOLE_VERSION") != "" || os.Getenv("KONSOLE_DBUS_SESSION") != "" {
 		return false
 	}
+	if isITerm2() {
+		return false
+	}
 	return true
+}
+
+// isITerm2 reports whether we are (or are sshed out of) iTerm2, which names
+// itself in TERM_PROGRAM locally and forwards LC_TERMINAL over ssh.
+//
+// TERM_PROGRAM wins whenever it is set, and the two signals must NOT simply be
+// OR'd: LC_TERMINAL is an LC_* variable, so it is built to survive into child
+// processes — launch Ghostty from an iTerm2 shell and Ghostty inherits
+// LC_TERMINAL=iTerm2 forever. It sets TERM_PROGRAM=ghostty for its own shell
+// but cannot unset what it inherited, so an OR would hand Ghostty the iTerm2
+// protocol and blank its artwork panel. Whatever set TERM_PROGRAM is the
+// terminal actually on the other end of this tty; only when nothing did (ssh
+// forwards LC_* but not TERM_PROGRAM) is the inherited hint worth trusting.
+func isITerm2() bool {
+	if prog := os.Getenv("TERM_PROGRAM"); prog != "" {
+		return strings.EqualFold(prog, "iTerm.app")
+	}
+	return strings.EqualFold(os.Getenv("LC_TERMINAL"), "iTerm2")
 }
 
 // kittyTransmit encodes img as PNG and returns the chunked APC escape

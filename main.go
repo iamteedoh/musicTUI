@@ -104,7 +104,7 @@ func usage() {
 	fmt.Println("(the setup wizard) without touching your real configuration. The")
 	fmt.Println("MUSICTUI_CONFIG_DIR environment variable does the same thing.")
 	fmt.Println("\nArtwork rendering can be forced with the MUSICTUI_ARTWORK")
-	fmt.Println("environment variable: kitty | sixel | blocks | braille.")
+	fmt.Println("environment variable: kitty | sixel | iterm2 | blocks | braille.")
 	fmt.Println("Run `musicTUI --caps` inside a terminal to see what it supports.")
 }
 
@@ -112,12 +112,15 @@ func usage() {
 // renderer that selects. Run it inside the terminal you're diagnosing.
 func printCaps() {
 	caps := termcap.Detect()
+	detected := components.DetectArtworkStyle(caps.Kitty, caps.Sixel)
 	style := "blocks (character art)"
-	switch components.DetectArtworkStyle(caps.Kitty, caps.Sixel) {
+	switch detected {
 	case components.StyleKitty:
 		style = "kitty graphics (real pixels)"
 	case components.StyleSixel:
 		style = "sixel graphics (real pixels)"
+	case components.StyleITerm2:
+		style = "iTerm2 inline images (real pixels)"
 	case components.StyleBraille:
 		style = "braille (character art)"
 	}
@@ -145,6 +148,9 @@ func printCaps() {
 		fmt.Println("\n  No usable cell size: the terminal answered neither CSI 16 t nor an")
 		fmt.Println("  exact CSI 14 t / CSI 18 t pair. Sixel is disabled — an image scaled")
 		fmt.Println("  against a guessed cell size would spill outside its panel.")
+		if detected == components.StyleITerm2 {
+			fmt.Println("  The iTerm2 tier is unaffected: its images are sized in cells.")
+		}
 	}
 }
 

@@ -154,10 +154,13 @@ func NewApp(cfg config.Config, bridgePath string, version string) App {
 		bridgePath:  bridgePath,
 	}
 	// Pixel-perfect album art where the terminal supports kitty-graphics
-	// Unicode placeholders (kitty, Ghostty); error-minimized block art
-	// elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty overrides). The
-	// terminal is queried directly for support (reliable across platforms,
-	// unlike env sniffing which missed Ghostty on Linux — MUS-20).
+	// Unicode placeholders (kitty, Ghostty), sixel (Windows Terminal,
+	// Konsole, …) or iTerm2's native inline images; error-minimized block
+	// art elsewhere (MUSICTUI_ARTWORK=blocks|braille|kitty|sixel|iterm2
+	// overrides). The terminal is queried directly for support (reliable
+	// across platforms, unlike env sniffing which missed Ghostty on Linux —
+	// MUS-20), except iTerm2, which answers the kitty query without
+	// rendering placeholders and is identified by name instead (MUS-30).
 	// Terminals that answer nothing get character art.
 	art := components.NewArtwork()
 	app.artwork = &art
@@ -442,7 +445,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Sequence(tea.ClearScreen, sixelRepaintCmd())
 		}
 		// A resize makes Bubble Tea repaint every line unconditionally, which
-		// the row diff can't observe. Force the cover to be painted again.
+		// the row diff can't observe. Force the cover to be painted again —
+		// and re-render the panel itself, because a cursor-positioned draw
+		// (iTerm2) bakes in the panel origin: a resize can move the panel
+		// without changing its size, and a memo hit would republish the old
+		// coordinates. (Sixel takes the branch above, whose repaint message
+		// drops the memo for the same reason.)
+		a.cache.art = panelMemo{}
 		a.cache.artRows = ""
 		return a, nil
 
@@ -2684,5 +2693,7 @@ func (a App) repaintSixelIfClobbered(frame string) {
 		return // those rows are unchanged, so the pixels are still intact
 	}
 	a.cache.artRows = covered
-	a.out.Queue(seq)
+	// Atomic: this frame blanks the very cells the payload paints, so the two
+	// must render as one or the cover blinks on every lyric (MUS-30).
+	a.out.QueueAtomic(seq)
 }
