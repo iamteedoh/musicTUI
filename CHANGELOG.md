@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2](https://github.com/iamteedoh/musicTUI/compare/v0.3.1...v0.3.2) (2026-07-18)
+
+
+### Features
+
+* add peak-hold caps and keep visualizer motion on tempo ([#23](https://github.com/iamteedoh/musicTUI/issues/23)) ([1c33f05](https://github.com/iamteedoh/musicTUI/commit/1c33f0584c8c86eb7fd9e3c62f02e98589653646))
+
+
+### Bug Fixes
+
+* adapt theme text contrast to the terminal background so it stays legible ([#29](https://github.com/iamteedoh/musicTUI/issues/29)) ([d5fab75](https://github.com/iamteedoh/musicTUI/commit/d5fab75d0198828882cbdf36a15aef15556cf3a0))
+* match the theme to the terminal's background ([#25](https://github.com/iamteedoh/musicTUI/issues/25)) ([1ab2023](https://github.com/iamteedoh/musicTUI/commit/1ab2023e006bf975a90088d8d4e7f1f121d7096b))
+* prevent blank kitty artwork panel caused by float truncation in image-id color encoding ([#28](https://github.com/iamteedoh/musicTUI/issues/28)) ([4a85ff3](https://github.com/iamteedoh/musicTUI/commit/4a85ff301ae9742983bf7750dd67371786cccf04))
+* render album artwork in iTerm2 ([#26](https://github.com/iamteedoh/musicTUI/issues/26)) ([a0b5403](https://github.com/iamteedoh/musicTUI/commit/a0b5403cf211b2403277abf05265298318b0f05e))
+* replace the raw lyrics fetch error with a retryable message ([#27](https://github.com/iamteedoh/musicTUI/issues/27)) ([7d840cd](https://github.com/iamteedoh/musicTUI/commit/7d840cd36006a85473087374f54032c935064b4d))
+
 ## [0.3.1](https://github.com/iamteedoh/musicTUI/compare/v0.3.0...v0.3.1) (2026-07-09)
 
 
